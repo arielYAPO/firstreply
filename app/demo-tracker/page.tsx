@@ -47,25 +47,25 @@ const tealActionClass =
 
 const statusConfig: Record<PrimaryStatus, StatusConfig> = {
   Ghosté: {
-    badgeClass: "border-zinc-200 bg-zinc-100 text-zinc-700",
-    cardClass: "border-zinc-200 bg-zinc-50/80",
+    badgeClass: "border-zinc-300 bg-zinc-200 text-zinc-700",
+    cardClass: "border-zinc-300 bg-zinc-100",
     railClass: "bg-zinc-400",
     dotClass: "bg-zinc-500",
     menuDotClass: "bg-zinc-500",
-    secondaryClass: "text-zinc-700",
-    secondaryLabel: "Sans réponse : 14j",
+    secondaryClass: "text-zinc-600",
+    secondaryLabel: "Sans réponse",
     action: "followup",
     actionClass: tealActionClass,
     optionIcon: "●",
   },
   Refusé: {
-    badgeClass: "border-red-100 bg-red-50 text-red-700",
-    cardClass: "border-red-100 bg-red-50/55 opacity-80",
-    railClass: "bg-red-300",
-    dotClass: "bg-red-500",
+    badgeClass: "border-red-300 bg-red-500 text-white font-bold",
+    cardClass: "border-red-300 bg-red-50 opacity-90",
+    railClass: "bg-red-500",
+    dotClass: "bg-white",
     menuDotClass: "bg-red-500",
-    secondaryClass: "text-red-500",
-    secondaryLabel: "Archivé",
+    secondaryClass: "text-red-600 font-bold",
+    secondaryLabel: "Refusé",
     action: "none",
     actionClass: tealActionClass,
     optionIcon: "●",
@@ -475,7 +475,7 @@ export default function DemoTrackerPage() {
           </button>
         </section>
 
-        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+        <section className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
           {visibleApplications.map((application) => (
             <ApplicationCard
               key={application.id}
@@ -523,7 +523,7 @@ function ApplicationCard({
 
   return (
     <article
-      className={`relative min-h-[188px] rounded-[22px] border p-4 shadow-sm transition-[border-color,box-shadow,transform,opacity] duration-200 ${
+      className={`relative min-h-[164px] rounded-[18px] border p-3 shadow-sm transition-[border-color,box-shadow,transform,opacity] duration-200 ${
         config.cardClass
       } ${application.isHero ? "ring-2 ring-[#0d9488]/25" : ""} ${
         menuOpen ? "z-50" : ""
@@ -823,12 +823,12 @@ function buildApplication(index: number): DemoApplication {
 }
 
 function getGeneratedStatus(index: number): PrimaryStatus {
-  if (index < 35) return "Refusé";
-  if (index < 60) return "Ghosté";
-  if (index < 75) return "À relancer";
-  if (index < 91) return "En attente";
-  if (index < 95) return "Entretien";
-  return (["Ghosté", "À relancer", "En attente", "Refusé"] as PrimaryStatus[])[index - 95];
+  if (index < 62) return "Refusé";
+  if (index < 78) return "Ghosté";
+  if (index < 86) return "À relancer";
+  if (index < 92) return "En attente";
+  if (index < 96) return "Entretien";
+  return (["Ghosté", "Refusé", "Refusé", "Refusé"] as PrimaryStatus[])[index - 96];
 }
 
 function getGeneratedScore(index: number, role: string, status: PrimaryStatus) {
