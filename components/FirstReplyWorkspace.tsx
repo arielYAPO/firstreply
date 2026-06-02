@@ -27,6 +27,7 @@ type OutreachResult = {
   followUpJ7: string;
 };
 type TrackerFilter = "active" | "all" | "won";
+type TrackerSort = "priority" | "recent";
 type TrackerUrgency = "overdue" | "today" | "interview" | "waiting" | "prepared" | "won" | "done";
 type CelebrationState = {
   company: string;
@@ -34,10 +35,9 @@ type CelebrationState = {
 
 const ANALYSIS_STEPS = [
   "Lecture de l'offre",
-  "Extraction des compétences clés",
-  "Comparaison avec ton profil",
-  "Définition de l'angle d'approche",
-  "Rédaction de la lettre et du mail",
+  "Extraction et évaluation des critères",
+  "Calcul du score de correspondance",
+  "Rédaction du dossier de candidature",
   "Préparation du plan de contact",
 ];
 
@@ -202,11 +202,16 @@ export default function FirstReplyWorkspace() {
       setLoadingStep((current) =>
         Math.min(current + 1, ANALYSIS_STEPS.length - 1)
       );
-    }, 1200);
+    }, 5000);
 
     const progressInterval = window.setInterval(() => {
-      setProgress((current) => Math.min(current + 1.2, 96));
-    }, 120);
+      setProgress((current) => {
+        if (current < 60) return current + 0.8;
+        if (current < 85) return current + 0.3;
+        if (current < 96) return current + 0.1;
+        return current;
+      });
+    }, 200);
 
     return () => {
       window.clearInterval(stepInterval);
@@ -512,11 +517,38 @@ export default function FirstReplyWorkspace() {
           onSelect={selectFromTracker}
           onActionDone={markTrackerActionDone}
           onWon={markApplicationWon}
-          onStatusChange={(id, status) => updateTrackerApplication(id, { status })}
+          onDelete={(id) =>
+            updateApplications((apps) => apps.filter((a) => a.id !== id))
+          }
+          onStatusChange={(id, status) => {
+            const patch: Partial<TrackedApplication> = { status };
+            if (status !== "Won") {
+              patch.wonAt = "";
+              patch.nextActionType = undefined;
+              patch.nextAction = "";
+            }
+            updateTrackerApplication(id, patch);
+          }}
           onCloseCelebration={() => setCelebration(null)}
         />
       ) : (
         <div className="mx-auto max-w-[720px] px-4 pb-20 pt-5 sm:px-5 sm:pt-8">
+          {inputCollapsed && activeApplication && (
+            <div className="mb-3 flex items-center gap-2">
+              <button
+                onClick={() => setTrackerOpen(true)}
+                className="rounded-2xl border border-slate-200 bg-white/60 px-3 py-1.5 text-[11px] font-black text-slate-500 transition hover:border-[#0d9488] hover:text-[#0d9488]"
+              >
+                ← Suivi
+              </button>
+              <button
+                onClick={startNewApplication}
+                className="rounded-2xl border border-teal-200 bg-teal-50/70 px-3 py-1.5 text-[11px] font-black text-teal-700 transition hover:bg-teal-100"
+              >
+                + Nouvelle candidature
+              </button>
+            </div>
+          )}
           {inputCollapsed && activeApplication ? (
             <CollapsedInputSummary
               application={activeApplication}
@@ -1258,6 +1290,7 @@ function TrackerBoard({
   onSelect,
   onActionDone,
   onWon,
+  onDelete,
   onStatusChange,
   onCloseCelebration,
 }: {
@@ -1271,10 +1304,12 @@ function TrackerBoard({
   onSelect: (application: TrackedApplication) => void;
   onActionDone: (application: TrackedApplication) => void;
   onWon: (application: TrackedApplication) => void;
+  onDelete: (id: string) => void;
   onStatusChange: (id: string, status: ApplicationStatus) => void;
   onCloseCelebration: () => void;
 }) {
   const [openStatusMenu, setOpenStatusMenu] = useState("");
+  const [sort, setSort] = useState<TrackerSort>("priority");
 
   const trackerItems = items.map((item) => ({
     application: item,
@@ -1291,7 +1326,14 @@ function TrackerBoard({
       const haystack = `${application.company} ${application.role} ${application.nextAction}`.toLowerCase();
       return haystack.includes(search.trim().toLowerCase());
     })
-    .sort((a, b) => a.state.priority - b.state.priority);
+    .sort((a, b) => {
+      if (sort === "recent") {
+        const dateA = new Date(a.application.createdAt || 0).getTime();
+        const dateB = new Date(b.application.createdAt || 0).getTime();
+        return dateB - dateA;
+      }
+      return a.state.priority - b.state.priority;
+    });
 
   return (
     <section className="min-h-[calc(100vh-52px)] bg-[#f5f7f3] px-3 py-4 sm:min-h-[calc(100vh-56px)] sm:px-6 sm:py-6">
@@ -1330,32 +1372,47 @@ function TrackerBoard({
         </div>
 
         <div className="mb-4 grid grid-cols-3 gap-1.5 sm:mb-5 sm:grid-cols-5 sm:gap-2">
-          <TrackerStatCard label="En cours" value={stats.active} tone="neutral" />
-          <TrackerStatCard label="Aujourd'hui" value={stats.today} tone="amber" />
-          <TrackerStatCard label="En retard" value={stats.overdue} tone="red" />
+          <TrackerStatCard label="Candidatures" value={stats.total} tone="neutral" />
+          <TrackerStatCard label="Refusés" value={stats.rejected} tone="red" />
+          <TrackerStatCard label="Sans réponse" value={stats.noResponse} tone="ghosted" />
           <TrackerStatCard label="Entretiens" value={stats.interview} tone="blue" />
           <TrackerStatCard label="Décrochés" value={stats.won} tone="teal" />
         </div>
 
-        <div className="mb-4 flex items-center gap-3 overflow-x-auto border-b border-slate-300/60 pb-3 sm:mb-5 sm:flex-wrap">
-          <TrackerFilterButton
-            active={filter === "active"}
-            label="En cours"
-            count={stats.active}
-            onClick={() => onFilterChange("active")}
-          />
-          <TrackerFilterButton
-            active={filter === "all"}
-            label="Toutes"
-            count={items.length}
-            onClick={() => onFilterChange("all")}
-          />
-          <TrackerFilterButton
-            active={filter === "won"}
-            label="Décrochées"
-            count={stats.won}
-            onClick={() => onFilterChange("won")}
-          />
+        <div className="mb-4 flex items-center justify-between gap-3 border-b border-slate-300/60 pb-3 sm:mb-5">
+          <div className="flex items-center gap-3 overflow-x-auto sm:flex-wrap">
+            <TrackerFilterButton
+              active={filter === "active"}
+              label="En cours"
+              count={stats.active}
+              onClick={() => { onFilterChange("active"); setSort("priority"); }}
+            />
+            <TrackerFilterButton
+              active={filter === "all"}
+              label="Toutes"
+              count={items.length}
+              onClick={() => onFilterChange("all")}
+            />
+            <TrackerFilterButton
+              active={filter === "won"}
+              label="Décrochées"
+              count={stats.won}
+              onClick={() => { onFilterChange("won"); setSort("recent"); }}
+            />
+          </div>
+          <button
+            onClick={() => setSort((current) => current === "priority" ? "recent" : "priority")}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-2xl border px-3 py-1.5 text-[10px] font-black transition sm:text-[11px] ${
+              sort === "recent"
+                ? "border-[#0d9488] bg-teal-50/70 text-[#0d9488]"
+                : "border-slate-200 bg-white/60 text-slate-500 hover:border-[#0d9488] hover:text-[#0d9488]"
+            }`}
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+            </svg>
+            {sort === "recent" ? "Récentes" : "Urgence"}
+          </button>
         </div>
 
         {filteredItems.length === 0 ? (
@@ -1382,6 +1439,7 @@ function TrackerBoard({
                 onSelect={() => onSelect(application)}
                 onActionDone={() => onActionDone(application)}
                 onWon={() => onWon(application)}
+                onDelete={() => onDelete(application.id)}
               />
             ))}
           </div>
@@ -1472,12 +1530,13 @@ function TrackerStatCard({
 }: {
   label: string;
   value: number;
-  tone: "neutral" | "amber" | "red" | "blue" | "teal";
+  tone: "neutral" | "amber" | "red" | "ghosted" | "blue" | "teal";
 }) {
   const styles = {
     neutral: "border-slate-200 bg-white/60 text-slate-900",
     amber: "border-amber-200 bg-amber-50/70 text-amber-700",
     red: "border-red-200 bg-red-50/70 text-red-700",
+    ghosted: "border-zinc-200 bg-zinc-50/80 text-zinc-700",
     blue: "border-blue-200 bg-blue-50/80 text-blue-800",
     teal: "border-emerald-200 bg-emerald-50/80 text-emerald-700",
   };
@@ -1533,6 +1592,7 @@ function TrackerCompactCard({
   onSelect,
   onActionDone,
   onWon,
+  onDelete,
 }: {
   application: TrackedApplication;
   state: ReturnType<typeof getTrackerState>;
@@ -1542,6 +1602,7 @@ function TrackerCompactCard({
   onSelect: () => void;
   onActionDone: () => void;
   onWon: () => void;
+  onDelete: () => void;
 }) {
   const config = trackerStatusConfig[application.status] ?? trackerStatusConfig["A contacter"];
   const tags = [application.contractType, application.location].filter(Boolean);
@@ -1589,7 +1650,19 @@ function TrackerCompactCard({
           )}
         </div>
 
-        <TrackerScoreRing score={application.matchScore} won={isWon} />
+        <div className="flex items-center gap-1.5">
+          <TrackerScoreRing score={application.matchScore} won={isWon} />
+          <button
+            onClick={onDelete}
+            aria-label="Supprimer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg text-slate-300 transition hover:bg-red-50 hover:text-red-400"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <h2
@@ -1669,13 +1742,16 @@ function TrackerScoreRing({ score, won }: { score: number; won: boolean }) {
   );
 }
 
-function getTrackerStats(items: Array<{ state: ReturnType<typeof getTrackerState> }>) {
+function getTrackerStats(
+  items: Array<{ application: TrackedApplication; state: ReturnType<typeof getTrackerState> }>,
+) {
   return {
-    active: items.filter(({ state }) => !["won", "done"].includes(state.urgency)).length,
-    today: items.filter(({ state }) => state.urgency === "today").length,
-    overdue: items.filter(({ state }) => state.urgency === "overdue").length,
+    total: items.length,
+    rejected: items.filter(({ application }) => application.status === "Refus").length,
+    noResponse: items.filter(({ application }) => application.status === "No response").length,
     interview: items.filter(({ state }) => state.urgency === "interview").length,
     won: items.filter(({ state }) => state.urgency === "won").length,
+    active: items.filter(({ state }) => !["won", "done"].includes(state.urgency)).length,
   };
 }
 

@@ -85,95 +85,57 @@ class OpenAIQuotaError extends Error {
 }
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-5-nano";
-const ANALYSIS_CACHE_VERSION = "2026-05-13-final-prompts-v2";
+const ANALYSIS_CACHE_VERSION = "2026-05-31-merged-extract-eval-v1";
 
-const CRITERIA_EXTRACTION_PROMPT = `PROMPT SYSTÈME — APPEL 1a : Extraction des critères
-Tu es un analyste de recrutement. Ta seule tâche est d'extraire les prérequis d'une offre d'emploi.
+const EXTRACT_AND_EVALUATE_PROMPT = `PROMPT SYSTÈME — Extraction des critères ET évaluation du profil (en un seul appel)
 
-Lis attentivement l'offre fournie par l'utilisateur. Identifie chaque compétence, qualification, expérience ou condition demandée.
+Tu es un analyste de recrutement expert. Tu vas effectuer DEUX tâches en une seule réponse :
 
-Pour chaque prérequis, détermine son niveau :
-- "indispensable" : le prérequis est explicitement requis, présenté comme obligatoire, ou structurellement nécessaire pour le poste (ex : diplôme exigé, langue de travail, compétence cœur du poste)
-- "souhaité" : le prérequis est mentionné comme un plus, un bonus, une préférence, ou utilise des termes comme "idéalement", "un plus", "serait apprécié", "de préférence", "c'est un plus si"
+TÂCHE 1 — EXTRACTION : Identifie les prérequis clés de l'offre d'emploi.
+TÂCHE 2 — ÉVALUATION : Évalue le profil candidat contre chaque critère extrait.
+
+Pour chaque prérequis, détermine :
+- Son niveau :
+  * "indispensable" : explicitement requis, obligatoire, ou structurellement nécessaire pour le poste
+  * "souhaité" : mentionné comme un plus, un bonus, une préférence ("idéalement", "un plus", "serait apprécié")
+- Son verdict par rapport au profil du candidat :
+  * "oui" : le candidat a clairement cette compétence. Preuve concrète dans le profil (projet, poste, formation, stage).
+  * "partiel" : le candidat a quelque chose de lié mais pas exactement ce qui est demandé. Expérience similaire, compétence adjacente, théorie sans pratique.
+  * "non" : rien dans le profil ne correspond, même indirectement.
+- Une justification en une phrase, factuelle, sans encouragement ni jugement.
 
 ACTIVATION DE LA RÈGLE DÉBUTANT — STRICTE :
 
-Étape 1 : avant d'extraire, cherche dans l'offre si elle contient mot pour mot une de ces expressions appliquées au POSTE ENTIER (pas à un critère isolé) :
-- "débutant accepté"
-- "sans expérience requise"
-- "premier emploi"
-- "junior bienvenu"
-- "formation assurée" (quand cette mention concerne l'ensemble du poste)
-- équivalents évidents
+Étape 1 : cherche dans l'offre si elle contient mot pour mot une de ces expressions appliquées au POSTE ENTIER (pas à un critère isolé) :
+- "débutant accepté", "sans expérience requise", "premier emploi", "junior bienvenu", "formation assurée" (quand appliquée au poste entier), ou équivalents évidents
 
 Étape 2 :
-- Si AUCUNE de ces expressions n'est présente au niveau du poste entier → règle débutant DÉSACTIVÉE. Extraction normale et exigeante.
-- Si une expression est présente → règle débutant ACTIVÉE : les critères d'expérience professionnelle dans le secteur exact deviennent "souhaité" au lieu de "indispensable".
+- Si AUCUNE de ces expressions n'est présente → règle débutant DÉSACTIVÉE. Extraction et évaluation normales et exigeantes.
+- Si une expression est présente → règle débutant ACTIVÉE :
+  * Les critères d'expérience professionnelle dans le secteur exact deviennent "souhaité"
+  * Un stage dans le secteur vaut "oui" sur les compétences sectorielles de base
+  * Une formation théorique récente dans le domaine vaut "oui" sur les fondamentaux
+  * L'absence d'années d'expérience cumulées ne pénalise pas
 
-Une offre qui exige "étudiant en master", "autonome et rigoureux", "capable de porter un sujet sur 2 ans" est une offre EXIGEANTE, même si elle accepte des alternants. La règle débutant NE s'applique PAS à ces offres.
+Une offre exigeant "étudiant en master", "autonome et rigoureux", "capable de porter un sujet sur 2 ans" est EXIGEANTE même si elle accepte des alternants. La règle débutant NE s'applique PAS.
 
-Si l'offre dit "X n'est pas requis, on te formera" pour un critère X spécifique, ce critère X est marqué "souhaité", mais les autres critères restent évalués normalement.
+Si l'offre dit "X n'est pas requis, on te formera" pour un critère X spécifique : ce critère X est marqué "souhaité" et évalué avec tolérance, mais les autres restent normaux.
 
 Règles strictes :
 - Extrais entre 4 et 8 critères. Pas moins de 4, pas plus de 8.
-- Chaque critère doit être une compétence, qualification ou condition distincte. Ne dédouble pas.
+- Chaque critère = une compétence, qualification ou condition distincte. Ne dédouble pas.
 - Formule chaque critère de manière concise (maximum 8 mots).
-- Si l'offre est vague, extrais uniquement les critères raisonnablement déductibles du titre du poste et marque-les "souhaité", sauf si l'offre les exige explicitement.
-- N'invente pas de critères qui ne sont pas dans l'offre.
-- Ne commente pas. Ne rajoute pas de texte. Réponds uniquement avec le JSON.
-
-Format de réponse (JSON strict) :
-[
-  {"critere": "...", "niveau": "indispensable"},
-  {"critere": "...", "niveau": "souhaité"}
-]`;
-
-const PROFILE_EVALUATION_PROMPT = `PROMPT SYSTÈME — APPEL 1b : Évaluation du profil
-Tu es un évaluateur de candidatures. Ta seule tâche est de vérifier si un profil candidat correspond à une liste de critères.
-
-Tu reçois :
-1. Une liste de critères au format JSON (extraits d'une offre d'emploi)
-2. Le texte du CV ou profil du candidat
-3. Le texte original de l'offre d'emploi (pour contexte)
-
-Pour chaque critère, donne un verdict :
-- "oui" : le candidat a clairement cette compétence, qualification ou expérience. Il y a une preuve concrète dans son profil (projet, poste, formation, certification, stage).
-- "partiel" : le candidat a quelque chose de lié mais pas exactement ce qui est demandé. Expérience similaire, compétence adjacente, formation théorique sans pratique, ou contexte différent.
-- "non" : rien dans le profil ne correspond à ce critère, même indirectement.
-
-ACTIVATION DE LA RÈGLE DÉBUTANT — STRICTE :
-
-Étape 1 : avant d'évaluer, cherche dans l'offre originale si elle contient mot pour mot une de ces expressions appliquées au POSTE ENTIER (pas à un critère isolé) :
-- "débutant accepté"
-- "sans expérience requise"
-- "premier emploi"
-- "junior bienvenu"
-- "formation assurée" (quand cette mention concerne l'ensemble du poste)
-- équivalents évidents
-
-Étape 2 :
-- Si AUCUNE de ces expressions n'est présente au niveau du poste entier → règle débutant DÉSACTIVÉE. Évaluation normale et exigeante.
-- Si une expression est présente → règle débutant ACTIVÉE :
-  * Un stage dans le secteur concerné vaut "oui" sur les compétences sectorielles de base
-  * Une formation théorique récente dans le domaine vaut "oui" sur les fondamentaux
-  * L'absence d'années d'expérience cumulées ne pénalise pas le score
-  * Les qualités humaines explicitement demandées (motivation, dynamisme, ambition) sont "oui" si démontrées par les choix de carrière
-
-Une offre qui exige "étudiant en master", "autonome et rigoureux", "capable de porter un sujet sur 2 ans" est une offre EXIGEANTE, même si elle accepte des alternants. La règle débutant NE s'applique PAS à ces offres. Évalue-les normalement.
-
-Si l'offre dit "X n'est pas requis, on te formera" pour UN critère X spécifique : ce critère X précis est évalué avec tolérance ("partiel" minimum si rien dans le profil), mais les autres critères restent évalués normalement.
-
-Règles strictes d'évaluation :
-- Sois exigeant sans être injuste. "partiel" n'est pas un "oui" timide. Mais ne sous-évalue pas un candidat qui coche ce que l'offre demande vraiment.
-- Si le candidat a un projet personnel, un stage, ou une expérience transférable démontrant la compétence, c'est un "oui", pas un "partiel".
-- Un score parfait (100/100) est rare et suspect. Si tous tes verdicts sont "oui", relis le CV et l'offre — il y a probablement au moins un critère où le candidat n'a pas exactement ce qui est demandé.
-- La justification doit faire une seule phrase, factuelle, sans encouragement ni jugement.
-- Ne calcule aucun score. Ne fais aucune recommandation. Tu donnes uniquement des verdicts.
+- Si l'offre est vague, extrais uniquement les critères raisonnablement déductibles et marque-les "souhaité".
+- N'invente pas de critères absents de l'offre.
+- Sois exigeant sans être injuste. "partiel" n'est pas un "oui" timide.
+- Projet personnel, stage, ou expérience transférable démontrant la compétence = "oui", pas "partiel".
+- Score parfait (100/100) est rare. Si tous tes verdicts sont "oui", il y a probablement au moins un critère partiel.
+- Ne calcule aucun score. Tu donnes uniquement l'extraction + les verdicts.
 - Ne commente pas. Réponds uniquement avec le JSON.
 
 Format de réponse (JSON strict) :
 [
-  {"critere": "...", "niveau": "...", "verdict": "oui|partiel|non", "justification": "..."}
+  {"critere": "...", "niveau": "indispensable|souhaité", "verdict": "oui|partiel|non", "justification": "..."}
 ]`;
 
 const CONTENT_GENERATION_PROMPT = `PROMPT SYSTÈME — APPEL 2 : Génération de contenu
@@ -302,10 +264,12 @@ export async function POST(request: Request) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const criteriaResult = await extractCriteria(openai, jobOfferText);
-    const criteria = criteriaResult.data;
-    const evaluationResult = await evaluateProfile(openai, criteria, profileText, jobOfferText);
-    const evaluation = evaluationResult.data;
+    const extractEvalResult = await extractAndEvaluate(openai, jobOfferText, profileText);
+    const evaluation = extractEvalResult.data;
+    const criteria: Criterion[] = evaluation.map((item) => ({
+      critere: item.critere,
+      niveau: item.niveau,
+    }));
     const score = calculateScore(evaluation);
     const contentResult = await generateFinalContent(openai, jobOfferText, profileText, evaluation, score);
     const content = contentResult.data;
@@ -316,8 +280,7 @@ export async function POST(request: Request) {
       criteria,
       evaluation,
       score,
-      criteriaResult,
-      evaluationResult,
+      extractEvalResult,
       contentResult,
     });
 
@@ -402,44 +365,23 @@ export async function POST(request: Request) {
   }
 }
 
-async function extractCriteria(openai: OpenAI, jobOfferText: string) {
-  return measureDuration(() =>
-    requestJsonWithRetry<Criterion[]>({
-      openai,
-      messages: [
-        { role: "system", content: CRITERIA_EXTRACTION_PROMPT },
-        { role: "user", content: `Offre d'emploi :\n\n${jobOfferText}` },
-      ],
-      expectedShape: "array",
-      temperature: 0,
-      normalize: normalizeCriteria,
-    }),
-  );
-}
-
-async function evaluateProfile(
-  openai: OpenAI,
-  criteria: Criterion[],
-  profileText: string,
-  jobOfferText: string,
-) {
+async function extractAndEvaluate(openai: OpenAI, jobOfferText: string, profileText: string) {
   return measureDuration(() =>
     requestJsonWithRetry<EvaluationItem[]>({
       openai,
       messages: [
-        { role: "system", content: PROFILE_EVALUATION_PROMPT },
+        { role: "system", content: EXTRACT_AND_EVALUATE_PROMPT },
         {
           role: "user",
           content: [
-            `Critères JSON :\n${JSON.stringify(criteria, null, 2)}`,
+            `Offre d'emploi :\n${jobOfferText}`,
             `Profil candidat :\n${profileText}`,
-            `Offre originale :\n${jobOfferText}`,
           ].join("\n\n---\n\n"),
         },
       ],
       expectedShape: "array",
       temperature: 0,
-      normalize: (value) => normalizeEvaluation(value, criteria),
+      normalize: normalizeExtractAndEvaluate,
     }),
   );
 }
@@ -624,14 +566,14 @@ function calculateScore(evaluation: EvaluationItem[]) {
   return Math.round((totals.total / totals.maxTotal) * 100);
 }
 
-function normalizeCriteria(value: unknown): Criterion[] | null {
-  const source = unwrapArray(value, ["criteres", "criteria", "prerequis"]);
+function normalizeExtractAndEvaluate(value: unknown): EvaluationItem[] | null {
+  const source = unwrapArray(value, ["criteres", "criteria", "evaluation", "evaluations", "prerequis", "resultats"]);
 
   if (!source) {
     return null;
   }
 
-  const criteria = source
+  const items = source
     .map((item) => {
       if (!isObject(item)) {
         return null;
@@ -639,50 +581,24 @@ function normalizeCriteria(value: unknown): Criterion[] | null {
 
       const critere = normalizeText(item.critere);
       const niveau = normalizeLevel(item.niveau);
+      const verdict = normalizeVerdict(item.verdict);
+      const justification = normalizeText(item.justification);
 
       if (!critere || !niveau) {
         return null;
       }
 
-      return { critere, niveau };
+      return {
+        critere,
+        niveau,
+        verdict: verdict ?? "non",
+        justification: justification || "Aucune preuve explicite dans le profil.",
+      };
     })
-    .filter((item): item is Criterion => Boolean(item))
+    .filter((item): item is EvaluationItem => Boolean(item))
     .slice(0, 8);
 
-  return criteria.length >= 4 ? criteria : null;
-}
-
-function normalizeEvaluation(value: unknown, criteria: Criterion[]): EvaluationItem[] | null {
-  const source = unwrapArray(value, ["evaluation", "evaluations", "resultats"]);
-
-  if (!source) {
-    return null;
-  }
-
-  const sourceItems = source.filter(isObject);
-
-  if (sourceItems.length === 0) {
-    return null;
-  }
-
-  const evaluation = criteria.map((criterion, index) => {
-    const source =
-      sourceItems.find(
-        (item) => normalizeText(item.critere).toLowerCase() === criterion.critere.toLowerCase(),
-      ) ?? sourceItems[index];
-
-    const verdict = normalizeVerdict(source?.verdict);
-    const justification = normalizeText(source?.justification);
-
-    return {
-      critere: criterion.critere,
-      niveau: criterion.niveau,
-      verdict: verdict ?? "non",
-      justification: justification || "Aucune preuve explicite dans le profil.",
-    };
-  });
-
-  return evaluation.length === criteria.length ? evaluation : null;
+  return items.length >= 4 ? items : null;
 }
 
 function normalizeFinalContent(value: unknown): FinalContent | null {
@@ -819,8 +735,7 @@ function buildScoringMetadata({
   criteria,
   evaluation,
   score,
-  criteriaResult,
-  evaluationResult,
+  extractEvalResult,
   contentResult,
 }: {
   offerText: string;
@@ -828,19 +743,16 @@ function buildScoringMetadata({
   criteria: Criterion[];
   evaluation: EvaluationItem[];
   score: number;
-  criteriaResult: TimedLlmResult<Criterion[]>;
-  evaluationResult: TimedLlmResult<EvaluationItem[]>;
+  extractEvalResult: TimedLlmResult<EvaluationItem[]>;
   contentResult: TimedLlmResult<FinalContent>;
 }) {
   const summary = summarizeEvaluation(evaluation);
   const totalInputTokens = sumNullable([
-    criteriaResult.usage.input,
-    evaluationResult.usage.input,
+    extractEvalResult.usage.input,
     contentResult.usage.input,
   ]);
   const totalOutputTokens = sumNullable([
-    criteriaResult.usage.output,
-    evaluationResult.usage.output,
+    extractEvalResult.usage.output,
     contentResult.usage.output,
   ]);
 
@@ -855,15 +767,12 @@ function buildScoringMetadata({
     score_calcule: score,
     evaluation_json: evaluation,
     criteria_json: criteria,
-    model_1a: OPENAI_MODEL,
-    model_1b: OPENAI_MODEL,
-    model_2: OPENAI_MODEL,
-    temperature_1a: 0,
-    temperature_1b: 0,
-    temperature_2: 0.3,
-    duration_1a_ms: criteriaResult.durationMs,
-    duration_1b_ms: evaluationResult.durationMs,
-    duration_2_ms: contentResult.durationMs,
+    model_extract_eval: OPENAI_MODEL,
+    model_content: OPENAI_MODEL,
+    temperature_extract_eval: 0,
+    temperature_content: 0.3,
+    duration_extract_eval_ms: extractEvalResult.durationMs,
+    duration_content_ms: contentResult.durationMs,
     estimated_input_tokens: totalInputTokens,
     estimated_output_tokens: totalOutputTokens,
     estimated_cost_centimes: null,
