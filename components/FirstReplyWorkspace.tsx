@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown } from "lucide-react";
 import {
@@ -16,6 +16,14 @@ import {
   saveSession,
   type FirstReplySession,
 } from "@/lib/session";
+import { useAuthContext } from "@/components/AuthProvider";
+import {
+  fetchApplications,
+  upsertApplication,
+  updateApplication as updateApplicationDB,
+  deleteApplication as deleteApplicationDB,
+} from "@/lib/applicationsDB";
+import BuyCreditsPanel from "@/components/BuyCreditsPanel";
 
 type Phase = "input" | "analyzing" | "result" | "outreach";
 type OutreachResult = {
@@ -154,6 +162,8 @@ const TRACKER_STATUS_OPTIONS = APPLICATION_STATUSES.filter(
 
 export default function FirstReplyWorkspace() {
   const router = useRouter();
+  const auth = useAuthContext();
+  const isAuthenticated = !!auth.user;
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const outreachRef = useRef<HTMLDivElement | null>(null);
   const [session, setSession] = useState<FirstReplySession | null>(null);
@@ -181,16 +191,22 @@ export default function FirstReplyWorkspace() {
   const [celebration, setCelebration] = useState<CelebrationState>(null);
 
   useEffect(() => {
-    const loadedSession = loadSession();
+    if (auth.loading) return;
 
+    if (isAuthenticated) {
+      fetchApplications().then((apps) => setApplications(apps));
+      return;
+    }
+
+    // Fallback: access key session
+    const loadedSession = loadSession();
     if (!loadedSession) {
       router.push("/");
       return;
     }
-
     setSession(loadedSession);
     setApplications(loadApplications());
-  }, [router]);
+  }, [router, auth.loading, isAuthenticated]);
 
   useEffect(() => {
     if (phase !== "analyzing") return;
@@ -227,21 +243,23 @@ export default function FirstReplyWorkspace() {
       return;
     }
 
-    const currentSession = loadSession();
-
-    if (!currentSession) {
-      router.push("/");
-      return;
+    if (!isAuthenticated) {
+      const currentSession = loadSession();
+      if (!currentSession) {
+        router.push("/");
+        return;
+      }
     }
 
     setPhase("analyzing");
 
     try {
+      const currentSession = loadSession();
       const response = await fetch("/api/analyze-application", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          accessKey: currentSession.key,
+          accessKey: currentSession?.key ?? null,
           jobOfferText: offer,
           profileText: profile,
         }),
@@ -256,28 +274,38 @@ export default function FirstReplyWorkspace() {
       }
 
       const application = data.application as TrackedApplication;
-      const nextApplications = [
-        application,
-        ...loadApplications().filter((item) => item.id !== application.id),
-      ];
 
-      localStorage.setItem(
-        APPLICATIONS_STORAGE_KEY,
-        JSON.stringify(nextApplications)
-      );
-      window.dispatchEvent(
-        new CustomEvent(APPLICATIONS_UPDATED_EVENT, { detail: nextApplications })
-      );
+      if (isAuthenticated && auth.user) {
+        await upsertApplication(application, auth.user.id);
+        const apps = await fetchApplications();
+        setApplications(apps);
+        auth.refreshCredits();
+      } else {
+        const nextApplications = [
+          application,
+          ...loadApplications().filter((item) => item.id !== application.id),
+        ];
+        localStorage.setItem(
+          APPLICATIONS_STORAGE_KEY,
+          JSON.stringify(nextApplications)
+        );
+        window.dispatchEvent(
+          new CustomEvent(APPLICATIONS_UPDATED_EVENT, { detail: nextApplications })
+        );
+        setApplications(nextApplications);
 
-      const nextSession = {
-        ...currentSession,
-        creditsUsed: currentSession.creditsLimit - data.creditsRemaining,
-        creditsRemaining: data.creditsRemaining,
-      };
+        const currentSessionForUpdate = loadSession();
+        if (currentSessionForUpdate) {
+          const nextSession = {
+            ...currentSessionForUpdate,
+            creditsUsed: currentSessionForUpdate.creditsLimit - data.creditsRemaining,
+            creditsRemaining: data.creditsRemaining,
+          };
+          saveSession(nextSession);
+          setSession(nextSession);
+        }
+      }
 
-      saveSession(nextSession);
-      setSession(nextSession);
-      setApplications(nextApplications);
       setActiveApplication(application);
       setPreparedContact("");
       setPreparedDomain("");
@@ -370,6 +398,19 @@ export default function FirstReplyWorkspace() {
   function updateApplications(
     updater: (applications: TrackedApplication[]) => TrackedApplication[]
   ) {
+    if (isAuthenticated) {
+      setApplications((prev) => {
+        const next = updater(prev);
+        setActiveApplication((current) =>
+          current
+            ? next.find((app) => app.id === current.id) ?? current
+            : current
+        );
+        return next;
+      });
+      return;
+    }
+
     const nextApplications = updater(loadApplications());
 
     localStorage.setItem(
@@ -393,6 +434,9 @@ export default function FirstReplyWorkspace() {
         application.id === applicationId ? { ...application, ...patch } : application
       )
     );
+    if (isAuthenticated) {
+      updateApplicationDB(applicationId, patch);
+    }
   }
 
   function markTrackerActionDone(application: TrackedApplication) {
@@ -479,12 +523,24 @@ export default function FirstReplyWorkspace() {
     setDomain("");
   }
 
-  function logout() {
+  function handleDeleteApplication(id: string) {
+    updateApplications((apps) => apps.filter((a) => a.id !== id));
+    if (isAuthenticated) {
+      deleteApplicationDB(id);
+    }
+  }
+
+  async function logout() {
+    if (isAuthenticated) {
+      await auth.signOut();
+    }
     clearSession();
     router.push("/");
   }
 
-  if (!session) {
+  const effectiveCredits = isAuthenticated ? auth.credits : (session?.creditsRemaining ?? 0);
+
+  if (auth.loading || (!isAuthenticated && !session)) {
     return (
       <main className="min-h-screen bg-[#f5f7f3] p-6 text-sm font-black text-slate-400">
         Chargement...
@@ -499,8 +555,9 @@ export default function FirstReplyWorkspace() {
       )}
 
       <TopBar
-        credits={session.creditsRemaining}
+        credits={effectiveCredits}
         trackerCount={applications.length}
+        userName={auth.user?.user_metadata?.full_name || auth.user?.user_metadata?.name || null}
         onOpenTracker={() => setTrackerOpen(true)}
         onLogout={logout}
       />
@@ -517,9 +574,7 @@ export default function FirstReplyWorkspace() {
           onSelect={selectFromTracker}
           onActionDone={markTrackerActionDone}
           onWon={markApplicationWon}
-          onDelete={(id) =>
-            updateApplications((apps) => apps.filter((a) => a.id !== id))
-          }
+          onDelete={(id) => handleDeleteApplication(id)}
           onStatusChange={(id, status) => {
             const patch: Partial<TrackedApplication> = { status };
             if (status !== "Won") {
@@ -533,6 +588,7 @@ export default function FirstReplyWorkspace() {
         />
       ) : (
         <div className="mx-auto max-w-[720px] px-4 pb-20 pt-5 sm:px-5 sm:pt-8">
+          {isAuthenticated && effectiveCredits === 0 && <BuyCreditsPanel />}
           {inputCollapsed && activeApplication && (
             <div className="mb-3 flex items-center gap-2">
               <button
@@ -612,11 +668,13 @@ export default function FirstReplyWorkspace() {
 function TopBar({
   credits,
   trackerCount,
+  userName,
   onOpenTracker,
   onLogout,
 }: {
   credits: number;
   trackerCount: number;
+  userName: string | null;
   onOpenTracker: () => void;
   onLogout: () => void;
 }) {
@@ -626,8 +684,13 @@ function TopBar({
         FirstReply
       </span>
       <div className="flex items-center gap-1.5 sm:gap-3">
+        {userName && (
+          <span className="hidden text-[11px] font-bold text-slate-500 sm:block">
+            {userName}
+          </span>
+        )}
         <span className="rounded-2xl border border-teal-200 bg-teal-50/70 px-2.5 py-1 text-[10px] font-black text-teal-700 sm:px-3 sm:py-1.5 sm:text-[11px]">
-          {credits}
+          {credits} crédit{credits !== 1 ? "s" : ""}
         </span>
         <button
           onClick={onOpenTracker}

@@ -4,16 +4,30 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Search, Send, BarChart3 } from "lucide-react";
 import { saveSession } from "@/lib/session";
+import { useAuthContext } from "@/components/AuthProvider";
 
 /* ──────────────────────────────────────────────
    Main component
    ────────────────────────────────────────────── */
 export default function AccessGate() {
   const router = useRouter();
+  const auth = useAuthContext();
   const [key, setKey] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [shake, setShake] = useState(false);
+  const [showAccessKey, setShowAccessKey] = useState(false);
+
+  useEffect(() => {
+    if (!auth.loading && auth.user) {
+      router.push("/dashboard");
+    }
+  }, [auth.loading, auth.user, router]);
+
+  async function handleGoogleSignIn() {
+    setLoading(true);
+    await auth.signInWithGoogle();
+  }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -101,57 +115,73 @@ export default function AccessGate() {
         </FadeUp>
 
         <FadeUp delay={3}>
-          <form
-            onSubmit={handleSubmit}
-            className="mx-auto mt-10 w-full max-w-[520px]"
-          >
-            <div
-              className={`flex items-center gap-2 rounded-2xl border bg-white p-2 shadow-lg shadow-slate-900/[0.04] transition focus-within:border-[#0d9488] focus-within:ring-4 focus-within:ring-teal-600/10 ${
-                error ? "border-red-400" : "border-slate-200"
-              } ${shake ? "animate-[shake_0.4s_ease]" : ""}`}
+          <div className="mx-auto mt-10 w-full max-w-[520px] space-y-4">
+            <button
+              onClick={handleGoogleSignIn}
+              disabled={loading}
+              className="flex w-full items-center justify-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-black text-slate-950 shadow-lg shadow-slate-900/[0.04] transition hover:border-[#0d9488] hover:shadow-teal-900/10 disabled:opacity-60"
             >
-              <input
-                type="text"
-                placeholder="Code d'accès"
-                value={key}
-                onChange={(event) => {
-                  setKey(event.target.value.toUpperCase());
-                  setError("");
-                }}
-                className="flex-1 bg-transparent px-4 py-3 text-sm font-semibold tracking-[0.03em] text-slate-950 outline-none placeholder:text-slate-400"
-              />
-              <button
-                disabled={loading}
-                className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-[#0d9488] px-5 py-3 text-sm font-black text-white transition hover:bg-[#0f766e] disabled:opacity-60"
-              >
-                {loading ? (
-                  <>
-                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                    <span className="hidden sm:inline">Vérification...</span>
-                  </>
-                ) : (
-                  <>
-                    Commencer
-                    <ArrowRight className="h-4 w-4" />
-                  </>
-                )}
-              </button>
-            </div>
-            {error && (
-              <p className="mt-2 text-left text-[12px] font-bold text-red-500">
-                {error}
-              </p>
-            )}
-          </form>
-        </FadeUp>
+              <svg className="h-5 w-5" viewBox="0 0 24 24">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+              </svg>
+              Commencer avec Google
+            </button>
 
-        <FadeUp delay={4}>
-          <p className="mt-4 font-mono text-[11px] text-slate-400">
-            Pas encore de code ?{" "}
-            <span className="font-semibold text-[#0d9488]">
-              Demande un accès.
-            </span>
-          </p>
+            {showAccessKey ? (
+              <form
+                onSubmit={handleSubmit}
+                className="w-full"
+              >
+                <div
+                  className={`flex items-center gap-2 rounded-2xl border bg-white p-2 shadow-lg shadow-slate-900/[0.04] transition focus-within:border-[#0d9488] focus-within:ring-4 focus-within:ring-teal-600/10 ${
+                    error ? "border-red-400" : "border-slate-200"
+                  } ${shake ? "animate-[shake_0.4s_ease]" : ""}`}
+                >
+                  <input
+                    type="text"
+                    placeholder="Code d'accès"
+                    value={key}
+                    onChange={(event) => {
+                      setKey(event.target.value.toUpperCase());
+                      setError("");
+                    }}
+                    className="flex-1 bg-transparent px-4 py-3 text-sm font-semibold tracking-[0.03em] text-slate-950 outline-none placeholder:text-slate-400"
+                  />
+                  <button
+                    disabled={loading}
+                    className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-[#0d9488] px-5 py-3 text-sm font-black text-white transition hover:bg-[#0f766e] disabled:opacity-60"
+                  >
+                    {loading ? (
+                      <>
+                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                        <span className="hidden sm:inline">Vérification...</span>
+                      </>
+                    ) : (
+                      <>
+                        Commencer
+                        <ArrowRight className="h-4 w-4" />
+                      </>
+                    )}
+                  </button>
+                </div>
+                {error && (
+                  <p className="mt-2 text-left text-[12px] font-bold text-red-500">
+                    {error}
+                  </p>
+                )}
+              </form>
+            ) : (
+              <button
+                onClick={() => setShowAccessKey(true)}
+                className="w-full text-center font-mono text-[11px] text-slate-400 transition hover:text-[#0d9488]"
+              >
+                J'ai un code d'accès
+              </button>
+            )}
+          </div>
         </FadeUp>
       </section>
 
@@ -255,22 +285,18 @@ export default function AccessGate() {
         </FadeUp>
         <FadeUp delay={2}>
           <p className="mx-auto mt-4 max-w-[400px] text-base font-medium text-slate-500">
-            Un code d'accès, et tu commences à candidater intelligemment.
+            Un compte Google, et tu commences à candidater intelligemment.
           </p>
         </FadeUp>
         <FadeUp delay={3}>
           <div className="mx-auto mt-8 flex flex-wrap items-center justify-center gap-3">
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault();
-                window.scrollTo({ top: 0, behavior: "smooth" });
-              }}
+            <button
+              onClick={handleGoogleSignIn}
               className="inline-flex items-center gap-2 rounded-full bg-[#0d9488] px-7 py-3.5 text-sm font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#0f766e]"
             >
-              Entrer mon code
+              Commencer avec Google
               <ArrowRight className="h-4 w-4" />
-            </a>
+            </button>
           </div>
         </FadeUp>
       </section>

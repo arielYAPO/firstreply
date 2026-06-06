@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { createHash } from "crypto";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
 
 import { createSupabaseAdmin } from "@/lib/supabaseAdmin";
 import type { ApplicationStatus, TrackedApplication } from "@/lib/applications";
@@ -200,16 +202,119 @@ RÈGLES GLOBALES :
 - Ne génère PAS d'email direct personnalisé ni de DM LinkedIn. Ces contenus sont générés dans l'appel /outreach ultérieur.
 - Réponds uniquement avec le JSON. Pas de texte autour.`;
 
+async function getAuthContext(request: Request) {
+  const body = await request.json().catch(() => null);
+  const accessKey = normalizeText(body?.accessKey);
+  const jobOfferText = normalizeText(body?.jobOfferText);
+  const profileText = normalizeText(body?.profileText);
+
+  const admin = createSupabaseAdmin();
+
+  // Try Supabase Auth first
+  const cookieStore = await cookies();
+  const supabaseAuth = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() { return cookieStore.getAll(); },
+        setAll(cookiesToSet) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options)
+            );
+          } catch { /* read-only context */ }
+        },
+      },
+    }
+  );
+  const { data: { user } } = await supabaseAuth.auth.getUser();
+
+  if (user) {
+    const { data: balance } = await admin
+      .from("credit_balances")
+      .select("credits")
+      .eq("user_id", user.id)
+      .single();
+
+    const credits = balance?.credits ?? 0;
+    return {
+      mode: "auth" as const,
+      userId: user.id,
+      credits,
+      accessKey: null,
+      body: { jobOfferText, profileText },
+      admin,
+      async consumeCredit() {
+        await admin
+          .from("credit_balances")
+          .update({ credits: credits - 1, updated_at: new Date().toISOString() })
+          .eq("user_id", user.id);
+        return credits - 1;
+      },
+      async storeGeneration(application: TrackedApplication, output: unknown) {
+        await admin.from("generations").insert({
+          access_key: `user:${user.id}`,
+          company: application.company,
+          role: application.role,
+          output: JSON.stringify(output),
+        });
+      },
+      getCacheKey() { return `user:${user.id}`; },
+    };
+  }
+
+  // Fallback: access key
+  if (!accessKey) return null;
+
+  const { data: keyData, error: keyError } = await admin
+    .from("access_keys")
+    .select("*")
+    .eq("key", accessKey)
+    .eq("active", true)
+    .single();
+
+  if (keyError || !keyData) return null;
+
+  const creditsLimit = Number(keyData.credits_limit ?? 0);
+  const creditsUsed = Number(keyData.credits_used ?? 0);
+  const credits = creditsLimit - creditsUsed;
+
+  return {
+    mode: "key" as const,
+    userId: null,
+    credits,
+    accessKey: keyData.key,
+    body: { jobOfferText, profileText },
+    admin,
+    async consumeCredit() {
+      await admin
+        .from("access_keys")
+        .update({ credits_used: creditsUsed + 1 })
+        .eq("key", keyData.key);
+      return credits - 1;
+    },
+    async storeGeneration(application: TrackedApplication, output: unknown) {
+      await admin.from("generations").insert({
+        access_key: keyData.key,
+        company: application.company,
+        role: application.role,
+        output: JSON.stringify(output),
+      });
+    },
+    getCacheKey() { return keyData.key; },
+  };
+}
+
 export async function POST(request: Request) {
   try {
-    const body = await request.json().catch(() => null);
-    const accessKey = normalizeText(body?.accessKey);
-    const jobOfferText = normalizeText(body?.jobOfferText);
-    const profileText = normalizeText(body?.profileText);
+    const auth = await getAuthContext(request);
 
-    if (!accessKey) {
-      return NextResponse.json({ error: "Code d'accès requis." }, { status: 400 });
+    if (!auth) {
+      return NextResponse.json({ error: "Authentification requise." }, { status: 401 });
     }
+
+    const { jobOfferText, profileText } = auth.body;
 
     if (!jobOfferText || !profileText) {
       return NextResponse.json(
@@ -225,27 +330,14 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = createSupabaseAdmin();
-    const { data: keyData, error: keyError } = await supabase
-      .from("access_keys")
-      .select("*")
-      .eq("key", accessKey)
-      .eq("active", true)
-      .single();
-
-    if (keyError || !keyData) {
-      return NextResponse.json({ error: "Code d'accès invalide." }, { status: 401 });
-    }
-
-    const creditsLimit = Number(keyData.credits_limit ?? 0);
-    const creditsUsed = Number(keyData.credits_used ?? 0);
-    const creditsRemaining = creditsLimit - creditsUsed;
+    const supabase = auth.admin;
+    const creditsRemaining = auth.credits;
     const normalizedOffer = normalizeInputForCache(jobOfferText);
     const normalizedProfile = normalizeInputForCache(profileText);
 
     const cachedOutput = await findCachedAnalysis(
       supabase,
-      keyData.key,
+      auth.getCacheKey(),
       normalizedOffer,
       normalizedProfile,
     );
@@ -300,14 +392,9 @@ export async function POST(request: Request) {
       fromCache: false,
     };
 
-    const { error: insertError } = await supabase.from("generations").insert({
-      access_key: keyData.key,
-      company: application.company,
-      role: application.role,
-      output: JSON.stringify(output),
-    });
-
-    if (insertError) {
+    try {
+      await auth.storeGeneration(application, output);
+    } catch (insertError) {
       console.error("Supabase generation insert error", insertError);
       return NextResponse.json(
         { error: "L'analyse a réussi, mais l'enregistrement a échoué. Aucun crédit n'a été consommé." },
@@ -315,12 +402,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const { error: updateError } = await supabase
-      .from("access_keys")
-      .update({ credits_used: creditsUsed + 1 })
-      .eq("key", keyData.key);
-
-    if (updateError) {
+    let newCreditsRemaining: number;
+    try {
+      newCreditsRemaining = await auth.consumeCredit();
+    } catch (updateError) {
       console.error("Supabase credit update error", updateError);
       return NextResponse.json(
         { error: "L'analyse a été enregistrée, mais le crédit n'a pas pu être consommé." },
@@ -330,7 +415,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ...output,
-      creditsRemaining: creditsRemaining - 1,
+      creditsRemaining: newCreditsRemaining,
     });
   } catch (error) {
     if (error instanceof InvalidLlmJsonError) {
