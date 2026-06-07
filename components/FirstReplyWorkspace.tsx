@@ -532,6 +532,13 @@ export default function FirstReplyWorkspace() {
 
   function logout() {
     clearSession();
+    // Clear all Supabase auth cookies
+    document.cookie.split(";").forEach((c) => {
+      const name = c.split("=")[0].trim();
+      if (name.startsWith("sb-")) {
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+      }
+    });
     // Fire signOut in background, don't wait for it
     auth.signOut().catch(() => {});
     // Force hard redirect immediately
