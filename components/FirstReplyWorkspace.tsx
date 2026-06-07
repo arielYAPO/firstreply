@@ -700,7 +700,7 @@ function TopBar({
         </button>
         <button
           onClick={onLogout}
-          className="hidden rounded-2xl px-2.5 py-1.5 text-[11px] font-black text-slate-400 transition hover:text-slate-700 sm:block"
+          className="rounded-2xl px-2.5 py-1 text-[10px] font-black text-slate-400 transition hover:text-slate-700 sm:px-2.5 sm:py-1.5 sm:text-[11px]"
         >
           Sortir
         </button>
