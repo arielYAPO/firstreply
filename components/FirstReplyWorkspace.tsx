@@ -535,7 +535,7 @@ export default function FirstReplyWorkspace() {
       await auth.signOut();
     }
     clearSession();
-    router.push("/");
+    window.location.href = "/";
   }
 
   const effectiveCredits = isAuthenticated ? auth.credits : (session?.creditsRemaining ?? 0);
@@ -700,9 +700,15 @@ function TopBar({
         </button>
         <button
           onClick={onLogout}
-          className="rounded-2xl px-2.5 py-1 text-[10px] font-black text-slate-400 transition hover:text-slate-700 sm:px-2.5 sm:py-1.5 sm:text-[11px]"
+          aria-label="Déconnexion"
+          title="Déconnexion"
+          className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 transition hover:bg-red-50 hover:text-red-500 sm:h-9 sm:w-9"
         >
-          Sortir
+          <svg className="h-4 w-4 sm:h-[18px] sm:w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
         </button>
       </div>
     </header>
