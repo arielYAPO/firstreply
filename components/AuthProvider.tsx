@@ -96,8 +96,12 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
-    const supabase = createSupabaseBrowser();
-    await supabase.auth.signOut();
+    try {
+      const supabase = createSupabaseBrowser();
+      await supabase.auth.signOut({ scope: "local" });
+    } catch {
+      // Ignore errors — we clear state regardless
+    }
     setUser(null);
     setCredits(0);
   }

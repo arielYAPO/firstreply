@@ -531,10 +531,14 @@ export default function FirstReplyWorkspace() {
   }
 
   async function logout() {
-    if (isAuthenticated) {
-      await auth.signOut();
+    try {
+      if (isAuthenticated) {
+        await auth.signOut();
+      }
+      clearSession();
+    } catch {
+      // Force logout even if signOut fails
     }
-    clearSession();
     window.location.href = "/";
   }
 
