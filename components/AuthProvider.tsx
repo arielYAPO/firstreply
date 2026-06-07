@@ -96,14 +96,18 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
-    try {
-      const supabase = createSupabaseBrowser();
-      await supabase.auth.signOut({ scope: "local" });
-    } catch {
-      // Ignore errors — we clear state regardless
-    }
     setUser(null);
     setCredits(0);
+    try {
+      const supabase = createSupabaseBrowser();
+      // scope: global kills the session server-side too
+      await Promise.race([
+        supabase.auth.signOut({ scope: "global" }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch {
+      // Ignore errors
+    }
   }
 
   async function refreshCredits() {
