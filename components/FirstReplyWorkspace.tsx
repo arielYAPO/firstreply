@@ -530,16 +530,12 @@ export default function FirstReplyWorkspace() {
     }
   }
 
-  async function logout() {
-    try {
-      if (isAuthenticated) {
-        await auth.signOut();
-      }
-      clearSession();
-    } catch {
-      // Force logout even if signOut fails
-    }
-    window.location.href = "/";
+  function logout() {
+    clearSession();
+    // Fire signOut in background, don't wait for it
+    auth.signOut().catch(() => {});
+    // Force hard redirect immediately
+    window.location.replace("/");
   }
 
   const effectiveCredits = isAuthenticated ? auth.credits : (session?.creditsRemaining ?? 0);
