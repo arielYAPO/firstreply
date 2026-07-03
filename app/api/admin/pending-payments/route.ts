@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { createSupabaseAdmin } from "@/lib/supabaseAdmin";
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "firstreply-admin-2024";
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const secret = searchParams.get("secret");
 
-    if (secret !== ADMIN_SECRET) {
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
       return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
     }
 

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createSupabaseAdmin } from "@/lib/supabaseAdmin";
 
-const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "firstreply-admin-2024";
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const CREDITS_PER_PACK = 100;
 
 /**
@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { secret, paymentRequestId, paypalReference, adminNote } = body;
 
-    if (secret !== ADMIN_SECRET) {
+    if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
       return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
     }
 
