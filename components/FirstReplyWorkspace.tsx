@@ -583,13 +583,19 @@ export default function FirstReplyWorkspace() {
           onWon={markApplicationWon}
           onDelete={(id) => handleDeleteApplication(id)}
           onStatusChange={(id, status) => {
-            const patch: Partial<TrackedApplication> = { status };
-            if (status !== "Won") {
-              patch.wonAt = "";
-              patch.nextActionType = undefined;
-              patch.nextAction = "";
+            if (status === "Won") {
+              const app = applications.find((a) => a.id === id);
+              if (app) {
+                markApplicationWon(app);
+              }
+              return;
             }
-            updateTrackerApplication(id, patch);
+            updateTrackerApplication(id, {
+              status,
+              wonAt: "",
+              nextActionType: undefined,
+              nextAction: "",
+            });
           }}
           onCloseCelebration={() => setCelebration(null)}
         />
