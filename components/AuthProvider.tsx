@@ -54,12 +54,16 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       const newUser = session?.user ?? null;
       setUser(newUser);
 
       if (newUser) {
-        await loadCredits(newUser.id);
+        // Defer the query: awaiting supabase calls inside onAuthStateChange
+        // deadlocks on the auth lock and the request never fires.
+        setTimeout(() => {
+          loadCredits(newUser.id);
+        }, 0);
       } else {
         setCredits(0);
       }
