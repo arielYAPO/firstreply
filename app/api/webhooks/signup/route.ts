@@ -192,7 +192,7 @@ export async function POST(request: Request) {
         `Nom : ${fullName}`,
         `Email : ${email}`,
         `Inscription : ${signupDate}`,
-        "Crédits initiaux : 10",
+        "Crédits initiaux : 3",
       ].join("\n"),
     });
   } catch (error) {
