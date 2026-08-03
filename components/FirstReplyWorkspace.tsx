@@ -49,6 +49,29 @@ const ANALYSIS_STEPS = [
   "Préparation du plan de contact",
 ];
 
+const ONBOARDING_STORAGE_PREFIX = "firstreply_onboarding_v1";
+const ONBOARDING_STARTED_STORAGE_PREFIX = "firstreply_onboarding_v1_started";
+const DRAFT_STORAGE_PREFIX = "firstreply_draft_v1";
+
+// Le stockage local peut échouer (quota dépassé sur un CV très long, navigation
+// privée, stockage bloqué). Ces écritures sont du confort : elles ne doivent
+// jamais interrompre une analyse réussie.
+function safeStorageSet(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignoré volontairement.
+  }
+}
+
+function safeStorageRemove(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignoré volontairement.
+  }
+}
+
 type TrackerStatusConfig = {
   badgeClass: string;
   cardClass: string;
@@ -61,6 +84,11 @@ type TrackerStatusConfig = {
 
 const tealActionClass =
   "border border-teal-200 bg-teal-50/70 text-teal-700 hover:bg-teal-100";
+
+// Le prix doit rester visible avant le mur, pas seulement une fois le solde
+// a zero : un compteur sans prix ne veut rien dire.
+const CREDIT_PACK_LABEL = "100 analyses pour 10 €";
+const LOW_CREDITS_THRESHOLD = 2;
 
 const trackerStatusConfig: Record<ApplicationStatus, TrackerStatusConfig> = {
   "A contacter": {
@@ -166,6 +194,7 @@ export default function FirstReplyWorkspace() {
   const isAuthenticated = !!auth.user;
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const outreachRef = useRef<HTMLDivElement | null>(null);
+  const contactSectionRef = useRef<HTMLElement | null>(null);
   const [session, setSession] = useState<FirstReplySession | null>(null);
   const [applications, setApplications] = useState<TrackedApplication[]>([]);
   const [activeApplication, setActiveApplication] =
@@ -176,7 +205,9 @@ export default function FirstReplyWorkspace() {
   const [inputCollapsed, setInputCollapsed] = useState(false);
   const [trackerOpen, setTrackerOpen] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
-  const [progress, setProgress] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [contactHighlight, setContactHighlight] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(false);
   const [loadingPhase2, setLoadingPhase2] = useState(false);
   const [contactName, setContactName] = useState("");
   const [domain, setDomain] = useState("");
@@ -189,13 +220,45 @@ export default function FirstReplyWorkspace() {
   const [trackerFilter, setTrackerFilter] = useState<TrackerFilter>("active");
   const [trackerSearch, setTrackerSearch] = useState("");
   const [celebration, setCelebration] = useState<CelebrationState>(null);
+  const [applicationsLoaded, setApplicationsLoaded] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [showFirstAnalysisSuccess, setShowFirstAnalysisSuccess] = useState(false);
+  const [firstAnalysisCreditsRemaining, setFirstAnalysisCreditsRemaining] =
+    useState<number | null>(null);
 
   useEffect(() => {
     if (auth.loading) return;
 
-    if (isAuthenticated) {
-      fetchApplications().then((apps) => setApplications(apps));
-      return;
+    if (isAuthenticated && auth.user) {
+      const userId = auth.user.id;
+      let cancelled = false;
+
+      fetchApplications().then((apps) => {
+        if (cancelled) return;
+
+        setApplications(apps);
+        setApplicationsLoaded(true);
+
+        const onboardingKey = `${ONBOARDING_STORAGE_PREFIX}:${userId}`;
+        const onboardingStartedKey =
+          `${ONBOARDING_STARTED_STORAGE_PREFIX}:${userId}`;
+        const onboardingDone = localStorage.getItem(onboardingKey) === "done";
+        const onboardingStarted =
+          localStorage.getItem(onboardingStartedKey) === "started";
+
+        if (apps.length > 0 && !onboardingDone) {
+          safeStorageSet(onboardingKey, "done");
+          safeStorageRemove(onboardingStartedKey);
+        }
+
+        setOnboardingOpen(
+          apps.length === 0 && !onboardingDone && !onboardingStarted
+        );
+      });
+
+      return () => {
+        cancelled = true;
+      };
     }
 
     // Fallback: access key session
@@ -206,37 +269,93 @@ export default function FirstReplyWorkspace() {
     }
     setSession(loadedSession);
     setApplications(loadApplications());
-  }, [router, auth.loading, isAuthenticated]);
+    setApplicationsLoaded(true);
+  }, [router, auth.loading, isAuthenticated, auth.user]);
 
   useEffect(() => {
     if (phase !== "analyzing") return;
 
     setLoadingStep(0);
-    setProgress(0);
+    setElapsedSeconds(0);
 
     const stepInterval = window.setInterval(() => {
       setLoadingStep((current) =>
         Math.min(current + 1, ANALYSIS_STEPS.length - 1)
       );
-    }, 5000);
+    }, 11000);
 
-    const progressInterval = window.setInterval(() => {
-      setProgress((current) => {
-        if (current < 60) return current + 0.8;
-        if (current < 85) return current + 0.3;
-        if (current < 96) return current + 0.1;
-        return current;
-      });
-    }, 200);
+    const clockInterval = window.setInterval(() => {
+      setElapsedSeconds((current) => current + 1);
+    }, 1000);
 
     return () => {
       window.clearInterval(stepInterval);
-      window.clearInterval(progressInterval);
+      window.clearInterval(clockInterval);
     };
   }, [phase]);
 
+  const draftStorageKey = `${DRAFT_STORAGE_PREFIX}:${
+    auth.user?.id ?? session?.key ?? "anon"
+  }`;
+  const draftReady =
+    !auth.loading &&
+    (isAuthenticated ? applicationsLoaded : Boolean(session));
+
+  useEffect(() => {
+    if (!draftReady) return;
+
+    try {
+      const raw = localStorage.getItem(draftStorageKey);
+      if (!raw) return;
+
+      const draft = JSON.parse(raw) as { offer?: string; profile?: string };
+      const savedOffer = typeof draft.offer === "string" ? draft.offer : "";
+      const savedProfile = typeof draft.profile === "string" ? draft.profile : "";
+
+      if (savedOffer.trim() || savedProfile.trim()) {
+        setOffer((current) => current || savedOffer);
+        setProfile((current) => current || savedProfile);
+        setDraftRestored(true);
+      }
+    } catch {
+      safeStorageRemove(draftStorageKey);
+    }
+    // Restore once when the workspace becomes ready.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftReady]);
+
+  useEffect(() => {
+    if (!draftReady || phase !== "input") return;
+
+    const timeout = window.setTimeout(() => {
+      if (offer.trim() || profile.trim()) {
+        safeStorageSet(draftStorageKey, JSON.stringify({ offer, profile }));
+      } else {
+        safeStorageRemove(draftStorageKey);
+      }
+    }, 400);
+
+    return () => window.clearTimeout(timeout);
+  }, [offer, profile, phase, draftReady, draftStorageKey]);
+
+  const goToContact = useCallback(() => {
+    contactSectionRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+    setContactHighlight(true);
+    window.setTimeout(() => {
+      document
+        .getElementById("firstreply-contact-name")
+        ?.focus({ preventScroll: true });
+    }, 450);
+    window.setTimeout(() => setContactHighlight(false), 2600);
+  }, []);
+
   async function handleAnalyze() {
     setError("");
+    setShowFirstAnalysisSuccess(false);
+    setFirstAnalysisCreditsRemaining(null);
 
     if (!offer.trim() || !profile.trim()) {
       setError("Colle l'offre et ton profil avant de lancer l'analyse.");
@@ -274,11 +393,24 @@ export default function FirstReplyWorkspace() {
       }
 
       const application = data.application as TrackedApplication;
+      const onboardingKey = auth.user
+        ? `${ONBOARDING_STORAGE_PREFIX}:${auth.user.id}`
+        : null;
+      const completesFirstOnboarding = Boolean(
+        onboardingKey &&
+          applications.length === 0 &&
+          localStorage.getItem(onboardingKey) !== "done"
+      );
 
       if (isAuthenticated && auth.user) {
-        await upsertApplication(application, auth.user.id);
+        const savedApplication = await upsertApplication(application, auth.user.id);
+        if (!savedApplication) {
+          setError("L’analyse a réussi, mais l’ajout au suivi a échoué. Réessaie.");
+          setPhase("input");
+          return;
+        }
         const apps = await fetchApplications();
-        setApplications(apps);
+        setApplications(apps.length > 0 ? apps : [savedApplication]);
         auth.refreshCredits();
       } else {
         const nextApplications = [
@@ -306,6 +438,24 @@ export default function FirstReplyWorkspace() {
         }
       }
 
+      if (completesFirstOnboarding && onboardingKey) {
+        safeStorageSet(onboardingKey, "done");
+        if (auth.user) {
+          safeStorageRemove(
+            `${ONBOARDING_STARTED_STORAGE_PREFIX}:${auth.user.id}`
+          );
+        }
+        setShowFirstAnalysisSuccess(true);
+        setFirstAnalysisCreditsRemaining(
+          typeof data.creditsRemaining === "number"
+            ? data.creditsRemaining
+            : Math.max(effectiveCredits - 1, 0)
+        );
+      }
+
+      safeStorageRemove(draftStorageKey);
+      setDraftRestored(false);
+
       setActiveApplication(application);
       setPreparedContact("");
       setPreparedDomain("");
@@ -313,7 +463,6 @@ export default function FirstReplyWorkspace() {
       setContactError("");
       setOutreachResult(null);
       setDomain("");
-      setProgress(100);
       setInputCollapsed(true);
       setPhase("result");
       window.setTimeout(() => {
@@ -495,6 +644,8 @@ export default function FirstReplyWorkspace() {
   }
 
   function selectFromTracker(application: TrackedApplication) {
+    setShowFirstAnalysisSuccess(false);
+    setFirstAnalysisCreditsRemaining(null);
     setActiveApplication(application);
     setInputCollapsed(true);
     setPhase("result");
@@ -508,6 +659,8 @@ export default function FirstReplyWorkspace() {
   }
 
   function startNewApplication() {
+    setShowFirstAnalysisSuccess(false);
+    setFirstAnalysisCreditsRemaining(null);
     setActiveApplication(null);
     setPhase("input");
     setTrackerOpen(false);
@@ -545,9 +698,26 @@ export default function FirstReplyWorkspace() {
     window.location.replace("/");
   }
 
+  function startFirstApplication() {
+    if (auth.user) {
+      safeStorageSet(
+        `${ONBOARDING_STARTED_STORAGE_PREFIX}:${auth.user.id}`,
+        "started"
+      );
+    }
+    setOnboardingOpen(false);
+    window.setTimeout(() => {
+      document.getElementById("firstreply-offer")?.focus();
+    }, 0);
+  }
+
   const effectiveCredits = isAuthenticated ? auth.credits : (session?.creditsRemaining ?? 0);
 
-  if (auth.loading || (!isAuthenticated && !session)) {
+  if (
+    auth.loading ||
+    (!isAuthenticated && !session) ||
+    (isAuthenticated && !applicationsLoaded)
+  ) {
     return (
       <main className="min-h-screen bg-[#f5f7f3] p-6 text-sm font-black text-slate-400">
         Chargement...
@@ -558,18 +728,29 @@ export default function FirstReplyWorkspace() {
   return (
     <main className="min-h-screen bg-[#f5f7f3] text-slate-950">
       {phase === "analyzing" && (
-        <AnalysisLoader activeStep={loadingStep} progress={progress} />
+        <AnalysisLoader activeStep={loadingStep} elapsedSeconds={elapsedSeconds} />
       )}
 
       <TopBar
         credits={effectiveCredits}
         trackerCount={applications.length}
         userName={auth.user?.user_metadata?.full_name || auth.user?.user_metadata?.name || null}
+        trackerDisabled={onboardingOpen}
         onOpenTracker={() => setTrackerOpen(true)}
         onLogout={logout}
       />
 
-      {trackerOpen ? (
+      {onboardingOpen ? (
+        <FirstRunWelcome
+          credits={effectiveCredits}
+          userName={
+            auth.user?.user_metadata?.full_name ||
+            auth.user?.user_metadata?.name ||
+            null
+          }
+          onStart={startFirstApplication}
+        />
+      ) : trackerOpen ? (
         <TrackerBoard
           items={applications}
           filter={trackerFilter}
@@ -625,14 +806,25 @@ export default function FirstReplyWorkspace() {
             />
           ) : (
             <InputZone
+              credits={effectiveCredits}
               offer={offer}
               profile={profile}
               phase={phase}
               error={error}
+              draftRestored={draftRestored}
               onOfferChange={setOffer}
               onProfileChange={setProfile}
               onAnalyze={handleAnalyze}
               onCollapse={() => setInputCollapsed(true)}
+            />
+          )}
+
+          {showFirstAnalysisSuccess && activeApplication && phase === "result" && (
+            <FirstAnalysisHero
+              application={activeApplication}
+              creditsRemaining={firstAnalysisCreditsRemaining ?? effectiveCredits}
+              onGoToContact={goToContact}
+              onOpenTracker={() => setTrackerOpen(true)}
             />
           )}
 
@@ -642,11 +834,18 @@ export default function FirstReplyWorkspace() {
               application={activeApplication}
               copiedKey={copiedKey}
               onCopy={copyText}
+              showNextStepCta={phase === "result" && !showFirstAnalysisSuccess}
+              onGoToContact={goToContact}
             />
           )}
 
           {activeApplication && phase === "result" && (
             <ContactFoundBox
+              refNode={contactSectionRef}
+              highlighted={contactHighlight}
+              application={activeApplication}
+              copiedKey={copiedKey}
+              onCopy={copyText}
               contactName={contactName}
               domain={domain}
               loading={loadingPhase2}
@@ -682,18 +881,20 @@ function TopBar({
   credits,
   trackerCount,
   userName,
+  trackerDisabled,
   onOpenTracker,
   onLogout,
 }: {
   credits: number;
   trackerCount: number;
   userName: string | null;
+  trackerDisabled: boolean;
   onOpenTracker: () => void;
   onLogout: () => void;
 }) {
   return (
-    <header className="sticky top-0 z-50 flex h-[52px] items-center justify-between border-b border-slate-200/60 bg-[#f5f7f3]/90 px-4 backdrop-blur-xl sm:h-[56px] sm:px-6">
-      <span className="text-[10px] font-black uppercase tracking-[0.18em] text-[#0d9488] sm:text-[11px]">
+    <header className="sticky top-0 z-50 flex h-[60px] items-center justify-between border-b border-slate-200/60 bg-[#f5f7f3]/90 px-4 backdrop-blur-xl sm:h-[56px] sm:px-6">
+      <span className="text-[10px] font-black uppercase tracking-[0.18em] text-[#0f766e] sm:text-[11px]">
         FirstReply
       </span>
       <div className="flex items-center gap-1.5 sm:gap-3">
@@ -702,12 +903,21 @@ function TopBar({
             {userName}
           </span>
         )}
-        <span className="rounded-2xl border border-teal-200 bg-teal-50/70 px-2.5 py-1 text-[10px] font-black text-teal-700 sm:px-3 sm:py-1.5 sm:text-[11px]">
+        <span
+          title={`Crédits restants. Ensuite : ${CREDIT_PACK_LABEL}.`}
+          className={`rounded-2xl border px-2.5 py-1 text-[10px] font-black sm:px-3 sm:py-1.5 sm:text-[11px] ${
+            credits <= LOW_CREDITS_THRESHOLD
+              ? "border-amber-300 bg-amber-50 text-amber-800"
+              : "border-teal-200 bg-teal-50/70 text-teal-800"
+          }`}
+        >
           {credits} crédit{credits !== 1 ? "s" : ""}
         </span>
         <button
           onClick={onOpenTracker}
-          className="rounded-2xl border border-slate-200 bg-white/60 px-2.5 py-1 text-[10px] font-black text-slate-600 transition hover:border-[#0d9488] hover:text-[#0d9488] sm:px-3.5 sm:py-1.5 sm:text-[11px]"
+          disabled={trackerDisabled}
+          title={trackerDisabled ? "Commence par préparer ta première candidature" : undefined}
+          className="inline-flex h-11 items-center rounded-2xl border border-slate-200 bg-white/60 px-2.5 text-[10px] font-black text-slate-700 transition hover:border-[#0f766e] hover:text-[#0f766e] disabled:cursor-not-allowed disabled:opacity-45 sm:h-9 sm:px-3.5 sm:text-[11px]"
         >
           Suivi ({trackerCount})
         </button>
@@ -715,7 +925,7 @@ function TopBar({
           onClick={onLogout}
           aria-label="Déconnexion"
           title="Déconnexion"
-          className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 transition hover:bg-red-50 hover:text-red-500 sm:h-9 sm:w-9"
+          className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-red-50 hover:text-red-600 sm:h-9 sm:w-9"
         >
           <svg className="h-4 w-4 sm:h-[18px] sm:w-[18px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -728,25 +938,528 @@ function TopBar({
   );
 }
 
+function FirstRunWelcome({
+  credits,
+  userName,
+  onStart,
+}: {
+  credits: number;
+  userName: string | null;
+  onStart: () => void;
+}) {
+  const firstName = userName?.trim().split(/\s+/)[0];
+  const [demoOpen, setDemoOpen] = useState(false);
+  const demoRef = useRef<HTMLDivElement | null>(null);
+
+  function openDemo() {
+    setDemoOpen(true);
+    window.setTimeout(() => {
+      demoRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  }
+
+  return (
+    <div className="mx-auto max-w-[760px] px-4 py-6 sm:px-6 sm:py-10">
+      <section className="w-full overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.08)] sm:rounded-[30px]">
+        <div className="border-b border-slate-100 bg-[linear-gradient(135deg,#ecfdf5,#ffffff_58%,#f0fdfa)] px-5 py-6 sm:px-10 sm:py-10">
+          <span className="inline-flex rounded-full border border-teal-200 bg-white/80 px-3 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-teal-800">
+            {credits} crédit{credits !== 1 ? "s" : ""} offert{credits !== 1 ? "s" : ""} · 1 analyse = 1 crédit
+          </span>
+          <h1 className="mt-4 max-w-[560px] text-[28px] font-black leading-[1.06] tracking-[-0.045em] text-slate-950 sm:mt-5 sm:text-4xl">
+            {firstName ? `Bienvenue ${firstName}.` : "Bienvenue."} Obtiens ta
+            première réponse plus vite.
+          </h1>
+          <p className="mt-3 max-w-[580px] text-sm font-medium leading-6 text-slate-600 sm:mt-4 sm:text-base">
+            Colle une offre et ton CV. FirstReply calcule ton score de
+            correspondance, te donne l’angle pour te démarquer, identifie qui
+            contacter, rédige tes messages et relances — puis suit chaque
+            candidature pour toi.
+          </p>
+        </div>
+
+        <div className="grid gap-2 px-5 py-4 sm:grid-cols-3 sm:gap-3 sm:px-10 sm:py-8">
+          {[
+            ["01", "Colle l’offre", "Le texte complet de l’annonce suffit."],
+            ["02", "Colle ton profil", "Ton CV ou un résumé de ton parcours."],
+            [
+              "03",
+              "Récupère ton plan",
+              "Score, angle, contact, messages et suivi — en 90 secondes environ.",
+            ],
+          ].map(([number, title, description]) => (
+            <div
+              key={number}
+              className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50/70 p-3 sm:block sm:p-4"
+            >
+              <span className="mt-0.5 shrink-0 text-[11px] font-black tracking-[0.16em] text-teal-800 sm:mt-0 sm:text-[10px]">
+                {number}
+              </span>
+              <div>
+                <p className="text-sm font-black text-slate-900 sm:mt-2">{title}</p>
+                <p className="mt-0.5 text-xs font-medium leading-5 text-slate-600 sm:mt-1">
+                  {description}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="px-5 pb-6 sm:px-10 sm:pb-10">
+          <button
+            type="button"
+            onClick={onStart}
+            className="w-full rounded-2xl bg-[#0f766e] px-5 py-4 text-sm font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#115e59]"
+          >
+            Préparer ma première candidature
+          </button>
+          <p className="mt-3 text-center text-xs font-bold text-slate-600">
+            {credits > 0
+              ? `1 analyse = 1 crédit. Il t’en restera ${Math.max(credits - 1, 0)}.`
+              : "Tu n’as plus de crédit disponible pour lancer une analyse."}{" "}
+            <span className="text-slate-400">
+              Ensuite : {CREDIT_PACK_LABEL}.
+            </span>
+          </p>
+
+          {!demoOpen ? (
+            <button
+              type="button"
+              aria-expanded={demoOpen}
+              aria-controls="firstreply-demo"
+              onClick={openDemo}
+              className="mx-auto mt-3 block min-h-11 rounded-xl px-4 text-sm font-black text-teal-800 underline decoration-teal-300 underline-offset-4 transition hover:text-teal-950"
+            >
+              Voir d’abord un exemple — gratuit
+            </button>
+          ) : (
+            <div ref={demoRef} className="scroll-mt-24">
+              <DemoPreview onTryOwn={onStart} />
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+type DemoTab = "analyse" | "contact" | "message" | "suivi";
+
+const DEMO_TABS: Array<{ id: DemoTab; label: string }> = [
+  { id: "analyse", label: "Analyse" },
+  { id: "contact", label: "Contact" },
+  { id: "message", label: "Message" },
+  { id: "suivi", label: "Suivi" },
+];
+
+function DemoPreview({ onTryOwn }: { onTryOwn: () => void }) {
+  const [tab, setTab] = useState<DemoTab>("analyse");
+  const tabIndex = DEMO_TABS.findIndex((item) => item.id === tab);
+  const isLastTab = tabIndex === DEMO_TABS.length - 1;
+
+  return (
+    <div
+      id="firstreply-demo"
+      role="region"
+      aria-label="Exemple gratuit du parcours FirstReply"
+      className="mt-5 overflow-hidden rounded-[20px] border border-slate-200 bg-slate-50/60 text-left animate-[fadeUp_0.4s_ease-out]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 bg-white/70 px-4 py-3 sm:px-5">
+        <div className="min-w-0">
+          <p className="text-[10px] font-black uppercase tracking-[0.14em] text-teal-800">
+            Exemple · entreprise fictive
+          </p>
+          <p className="mt-0.5 truncate text-sm font-black text-slate-950">
+            NovaTech · Stage Product Marketing
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full border border-teal-200 bg-teal-50/80 px-2.5 py-1 text-[10px] font-black text-teal-800">
+          0 crédit · rien n’est enregistré
+        </span>
+      </div>
+
+      <div
+        role="tablist"
+        aria-label="Étapes de l’exemple"
+        className="grid grid-cols-4 gap-1 border-b border-slate-200/70 bg-white/40 px-2 pt-2"
+      >
+        {DEMO_TABS.map((item, index) => {
+          const active = item.id === tab;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-controls={`firstreply-demo-panel-${item.id}`}
+              id={`firstreply-demo-tab-${item.id}`}
+              onClick={() => setTab(item.id)}
+              className={`flex min-h-10 flex-col items-center justify-center gap-0.5 rounded-t-xl border-b-2 px-1 pb-2 pt-1.5 transition sm:flex-row sm:gap-2 ${
+                active
+                  ? "border-[#0d9488] bg-white text-[#0f766e]"
+                  : "border-transparent text-slate-500 hover:text-[#0d9488]"
+              }`}
+            >
+              <span
+                className={`flex h-[18px] w-[18px] items-center justify-center rounded-full text-[9px] font-black ${
+                  active
+                    ? "bg-[#0d9488] text-white"
+                    : index < tabIndex
+                      ? "bg-teal-100 text-teal-800"
+                      : "bg-slate-200 text-slate-500"
+                }`}
+              >
+                {index + 1}
+              </span>
+              <span className="text-[11px] font-black sm:text-xs">{item.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        key={tab}
+        role="tabpanel"
+        id={`firstreply-demo-panel-${tab}`}
+        aria-labelledby={`firstreply-demo-tab-${tab}`}
+        className="px-4 py-4 sm:px-5 sm:py-5 animate-[fadeIn_0.25s_ease-out]"
+      >
+        {tab === "analyse" && <DemoAnalysePanel />}
+        {tab === "contact" && <DemoContactPanel />}
+        {tab === "message" && <DemoMessagePanel />}
+        {tab === "suivi" && <DemoSuiviPanel />}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200/70 bg-white/70 px-4 py-3 sm:px-5">
+        <p className="text-[10px] font-bold text-slate-500 sm:text-[11px]">
+          Exemple fictif — aucune IA n’est appelée, rien n’est ajouté à ton suivi.
+        </p>
+        {isLastTab ? (
+          <button
+            type="button"
+            onClick={onTryOwn}
+            className="inline-flex min-h-10 items-center justify-center rounded-2xl bg-[#0f766e] px-4 py-2 text-xs font-black text-white shadow-md shadow-teal-900/10 transition hover:bg-[#115e59] sm:text-sm"
+          >
+            Essayer avec ma propre offre
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setTab(DEMO_TABS[tabIndex + 1].id)}
+            className="inline-flex min-h-10 items-center gap-1 rounded-2xl border border-teal-200 bg-teal-50/70 px-4 py-2 text-xs font-black text-teal-800 transition hover:bg-teal-100 sm:text-sm"
+          >
+            Étape suivante : {DEMO_TABS[tabIndex + 1].label} →
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DemoAnalysePanel() {
+  return (
+    <div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-3">
+          <p className="text-[9px] font-black uppercase tracking-[0.13em] text-slate-400">
+            Ce que tu colles · l’offre
+          </p>
+          <p className="mt-1.5 text-[12px] font-semibold leading-5 text-slate-700">
+            « Stage Product Marketing 6 mois — Paris. Vous lancerez nos
+            campagnes, analyserez les usages et travaillerez avec l’équipe
+            produit… »
+          </p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-3">
+          <p className="text-[9px] font-black uppercase tracking-[0.13em] text-slate-400">
+            Ce que tu colles · ton profil
+          </p>
+          <p className="mt-1.5 text-[12px] font-semibold leading-5 text-slate-700">
+            « M1 marketing digital. Appli étudiante lancée en autonomie
+            (300 utilisateurs). Excel, GA4, Notion… »
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-start gap-4 rounded-2xl border border-slate-200 bg-white/80 p-4">
+        <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full border-4 border-[#0d9488] bg-white">
+          <span className="font-mono text-[22px] font-bold text-[#0d9488]">72</span>
+        </div>
+        <div className="min-w-0">
+          <p className="text-[10px] font-black uppercase tracking-[0.13em] text-slate-400">
+            Score de correspondance
+          </p>
+          <p className="mt-0.5 text-sm font-black text-slate-950">
+            Bonne correspondance
+          </p>
+          <p className="mt-1 text-[12px] font-medium leading-5 text-slate-600">
+            7 critères évalués : 4 acquis, 2 partiels, 1 manquant.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-3.5">
+          <p className="mb-2 text-[9px] font-black uppercase tracking-[0.13em] text-[#0d9488]">
+            Tes atouts
+          </p>
+          <p className="relative mb-1.5 pl-3.5 text-[12px] font-medium leading-5 text-slate-700">
+            <span className="absolute left-0 font-black text-[#0d9488]">+</span>
+            Projet SaaS mené en autonomie, avec de vrais utilisateurs
+          </p>
+          <p className="relative pl-3.5 text-[12px] font-medium leading-5 text-slate-700">
+            <span className="absolute left-0 font-black text-[#0d9488]">+</span>
+            À l’aise avec l’analyse de données (Excel, GA4)
+          </p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-3.5">
+          <p className="mb-2 text-[9px] font-black uppercase tracking-[0.13em] text-[#d97706]">
+            À compenser
+          </p>
+          <p className="relative pl-3.5 text-[12px] font-medium leading-5 text-slate-700">
+            <span className="absolute left-0 font-black text-[#d97706]">→</span>
+            Ils cherchent une première expérience growth — mets en avant les
+            résultats chiffrés de ton appli.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-2 rounded-2xl border border-teal-200 bg-teal-50/50 p-3.5">
+        <p className="mb-1 text-[9px] font-black uppercase tracking-[0.13em] text-[#0d9488]">
+          Ton angle d’approche
+        </p>
+        <p className="text-[12px] font-medium leading-5 text-slate-800">
+          Positionne-toi comme un profil produit orienté résultats : ton appli
+          étudiante prouve que tu sais lancer, mesurer et itérer — exactement ce
+          qu’ils attendent de ce stage.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function DemoContactPanel() {
+  return (
+    <div>
+      <p className="text-sm font-black text-slate-950">
+        Le bon contact, pas la boîte générique.
+      </p>
+      <p className="mt-1 text-[12px] font-medium leading-5 text-slate-600">
+        Un message envoyé à la personne qui recrute vraiment obtient bien plus
+        de réponses qu’un CV déposé dans un formulaire. FirstReply te dit qui
+        chercher :
+      </p>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {["Head of Marketing", "Product Marketing Manager", "Talent Acquisition"].map(
+          (role) => (
+            <span
+              key={role}
+              className="rounded-lg border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-bold text-slate-700"
+            >
+              {role}
+            </span>
+          )
+        )}
+      </div>
+      <div className="mt-2 rounded-2xl border border-slate-200 bg-white/80 px-3.5 py-2.5">
+        <p className="text-[9px] font-black uppercase tracking-[0.13em] text-slate-400">
+          Requête prête à copier
+        </p>
+        <code className="mt-1 block truncate font-mono text-[11px] text-slate-600 sm:text-[12px]">
+          site:linkedin.com/in &quot;NovaTech&quot; &quot;product marketing&quot;
+        </code>
+      </div>
+      <p className="mt-3 text-[12px] font-medium leading-5 text-slate-600">
+        Tu colles ensuite le nom trouvé : FirstReply déduit les formats d’email
+        probables et personnalise ton approche.
+      </p>
+    </div>
+  );
+}
+
+function DemoMessagePanel() {
+  return (
+    <div>
+      <p className="text-sm font-black text-slate-950">
+        Un message direct, personnalisé, prêt à envoyer.
+      </p>
+      <div className="mt-3 rounded-2xl border border-teal-200 bg-white/90 px-4 py-3.5">
+        <pre className="m-0 whitespace-pre-wrap font-mono text-[11px] font-medium leading-[1.7] text-slate-700 sm:text-[12px]">
+{`Objet : Stage Product Marketing — candidature directe
+
+Bonjour Claire,
+
+Je candidate au stage Product Marketing de NovaTech.
+J’ai lancé une appli étudiante utilisée par 300 personnes :
+positionnement, messages, mesure des résultats. Je veux
+faire la même chose pour votre lancement…`}
+        </pre>
+      </div>
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        {["Email direct", "DM LinkedIn", "Relance J+3", "Relance J+7"].map((item) => (
+          <span
+            key={item}
+            className="rounded-full border border-teal-200 bg-teal-50/70 px-2.5 py-1 text-[10px] font-black text-teal-800"
+          >
+            {item}
+          </span>
+        ))}
+      </div>
+      <p className="mt-2.5 text-[12px] font-medium leading-5 text-slate-600">
+        Les relances sont générées en même temps : tu sais quoi envoyer à J+3 et
+        J+7 si tu n’as pas de réponse.
+      </p>
+    </div>
+  );
+}
+
+function DemoSuiviPanel() {
+  return (
+    <div>
+      <p className="text-sm font-black text-slate-950">
+        Chaque analyse crée sa carte de suivi.
+      </p>
+      <p className="mt-1 text-[12px] font-medium leading-5 text-slate-600">
+        Tu retrouves ta candidature, son statut et sa prochaine action — sans
+        tableur à tenir à jour.
+      </p>
+
+      <div className="relative mt-3 rounded-[18px] border border-slate-200 bg-white/90 p-3.5 shadow-sm">
+        <div className="absolute inset-x-4 top-0 h-1 rounded-b-full bg-slate-400" />
+        <div className="mb-2.5 flex items-start justify-between gap-3">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-slate-100 px-3 py-1 text-[11px] font-black text-slate-700">
+            <span className="h-2 w-2 rounded-full bg-slate-500" />
+            À envoyer
+          </span>
+          <div className="flex h-11 w-11 items-center justify-center rounded-full border-[3px] border-[#0d9488]">
+            <span className="font-mono text-[12px] font-black text-[#0d9488]">72</span>
+          </div>
+        </div>
+        <p className="text-base font-black tracking-[-0.03em] text-slate-950">
+          NovaTech
+        </p>
+        <p className="mb-2 text-[12px] font-bold text-slate-600">
+          Stage Product Marketing
+        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[11px] font-black text-slate-600">
+            Prochaine action : envoyer le message à Claire
+          </p>
+          <span className="rounded-xl border border-teal-200 bg-teal-50/70 px-2.5 py-1 text-[10px] font-black text-teal-700">
+            Relance prévue J+3
+          </span>
+        </div>
+      </div>
+
+      <p className="mt-3 text-[12px] font-medium leading-5 text-slate-600">
+        FirstReply te dit quand relancer — et quand passer à la candidature
+        suivante.
+      </p>
+    </div>
+  );
+}
+
+function FirstAnalysisHero({
+  application,
+  creditsRemaining,
+  onGoToContact,
+  onOpenTracker,
+}: {
+  application: TrackedApplication;
+  creditsRemaining: number;
+  onGoToContact: () => void;
+  onOpenTracker: () => void;
+}) {
+  const company = safeText(application.company, "Entreprise");
+  const role = safeText(application.role, "Poste");
+
+  return (
+    <section
+      role="status"
+      aria-live="polite"
+      className="mb-4 overflow-hidden rounded-[22px] border border-emerald-200 bg-[linear-gradient(135deg,#ecfdf5,#ffffff_70%)] shadow-sm"
+    >
+      <div className="p-5 sm:p-6">
+        <p className="text-[10px] font-black uppercase tracking-[0.16em] text-emerald-800">
+          Première analyse réussie
+        </p>
+        <h2 className="mt-2 text-xl font-black tracking-[-0.03em] text-slate-950 sm:text-2xl">
+          Ta candidature {company} est prête — et déjà suivie.
+        </h2>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs font-black">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-3 py-1.5 text-emerald-800">
+            <span className="text-[13px] leading-none">✓</span>
+            Enregistrée dans ton suivi
+          </span>
+          <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-slate-700">
+            {creditsRemaining} crédit{creditsRemaining !== 1 ? "s" : ""} restant
+            {creditsRemaining !== 1 ? "s" : ""}
+          </span>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white/80 px-4 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-black text-slate-950">
+              {company}
+              <span className="mx-1.5 font-bold text-slate-300">·</span>
+              <span className="font-bold text-slate-600">{role}</span>
+            </p>
+            <p className="mt-0.5 text-[11px] font-bold text-slate-500">
+              Statut : à envoyer — tu pourras la retrouver ici à tout moment.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenTracker}
+            className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-black text-slate-600 transition hover:border-[#0d9488] hover:text-[#0d9488]"
+          >
+            Voir le suivi
+          </button>
+        </div>
+
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={onGoToContact}
+            className="inline-flex min-h-11 w-full items-center justify-center rounded-2xl bg-[#0f766e] px-4 py-3 text-sm font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#115e59] sm:w-auto"
+          >
+            Prochaine étape : trouver le bon contact
+          </button>
+          <p className="mt-2 text-xs font-bold leading-5 text-slate-600">
+            C’est l’étape qui change tout : un message envoyé à la bonne
+            personne obtient bien plus de réponses qu’une candidature déposée
+            dans un formulaire.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function InputZone({
+  credits,
   offer,
   profile,
   phase,
   error,
+  draftRestored,
   onOfferChange,
   onProfileChange,
   onAnalyze,
   onCollapse,
 }: {
+  credits: number;
   offer: string;
   profile: string;
   phase: Phase;
   error: string;
+  draftRestored: boolean;
   onOfferChange: (value: string) => void;
   onProfileChange: (value: string) => void;
   onAnalyze: () => void;
   onCollapse: () => void;
 }) {
+  const bothFilled = Boolean(offer.trim() && profile.trim());
+
   return (
     <section className="animate-[fadeUp_0.5s_ease-out]">
       {phase !== "input" && (
@@ -758,61 +1471,136 @@ function InputZone({
         </button>
       )}
 
+      {draftRestored && phase === "input" && (
+        <p className="mb-4 rounded-2xl border border-teal-200 bg-teal-50/60 px-4 py-2.5 text-xs font-bold text-teal-800">
+          Ton brouillon a été restauré — tu peux reprendre là où tu t’étais
+          arrêté.
+        </p>
+      )}
+
       <FieldTextarea
-        label="L'offre"
-        helper="Colle ici le texte complet de l'offre."
-        placeholder="Colle l'offre ici..."
+        id="firstreply-offer"
+        step="1"
+        label="L’offre"
+        helper="Colle l’annonce complète : missions, profil recherché, entreprise. Plus elle est complète, plus l’analyse est précise."
+        placeholder="Ex. « Stage Assistant Marketing (6 mois) — Lyon. Vous participerez au lancement de… »"
         value={offer}
         onChange={onOfferChange}
       />
       <FieldTextarea
+        step="2"
         label="Ton profil"
-        helper="Colle ton CV ou décris ton parcours et tes compétences."
-        placeholder="Colle ton CV ou profil ici..."
+        helper="Colle ton CV tel quel, ou résume ta formation, tes expériences, tes projets et tes compétences."
+        placeholder="Ex. « M1 marketing digital. Stage de 3 mois chez… Projets : … Compétences : Excel, Canva… »"
         value={profile}
         onChange={onProfileChange}
       />
 
       {error && (
-        <p className="mb-4 rounded-2xl border border-red-200 bg-red-50/70 px-4 py-3 text-sm font-bold text-red-600">
+        <p role="alert" className="mb-4 rounded-2xl border border-red-200 bg-red-50/70 px-4 py-3 text-sm font-bold text-red-700">
           {error}
         </p>
       )}
 
       {phase === "input" && (
-        <button
-          onClick={onAnalyze}
-          className="w-full rounded-2xl bg-[#0d9488] px-4 py-[15px] text-sm font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#0f766e]"
-        >
-          Analyser cette candidature — 1 crédit
-        </button>
+        <div>
+          <button
+            onClick={onAnalyze}
+            className={`w-full rounded-2xl px-4 py-[15px] text-sm font-black text-white shadow-lg shadow-teal-900/10 transition ${
+              bothFilled
+                ? "bg-[#0f766e] hover:bg-[#115e59]"
+                : "cursor-default bg-slate-300"
+            }`}
+          >
+            Analyser cette candidature — 1 crédit
+          </button>
+          <CreditCostLine credits={credits} />
+          <p className="mt-1 text-center text-[11px] font-bold text-slate-400">
+            Brouillon enregistré automatiquement sur cet appareil.
+          </p>
+        </div>
       )}
     </section>
   );
 }
 
+/**
+ * Coût de l'analyse et prix du pack, toujours affichés ensemble.
+ * Le ton reste factuel : on annonce la limite, on ne la dramatise pas.
+ */
+function CreditCostLine({ credits }: { credits: number }) {
+  if (credits <= 0) {
+    return (
+      <p className="mt-2 text-center text-xs font-bold text-slate-700">
+        Tu n’as plus de crédit.{" "}
+        <span className="text-[#0f766e]">{CREDIT_PACK_LABEL}.</span>
+      </p>
+    );
+  }
+
+  const remaining = credits - 1;
+  const low = credits <= LOW_CREDITS_THRESHOLD;
+
+  return (
+    <p
+      className={`mt-2 text-center text-xs font-bold ${
+        low ? "text-slate-800" : "text-slate-600"
+      }`}
+    >
+      {credits === 1
+        ? "C’est ton dernier crédit gratuit."
+        : `Cette analyse utilise 1 crédit. Il t’en restera ${remaining}.`}{" "}
+      <span className={low ? "text-[#0f766e]" : "text-slate-400"}>
+        Ensuite : {CREDIT_PACK_LABEL}.
+      </span>
+    </p>
+  );
+}
+
 function FieldTextarea({
+  id,
+  step,
   label,
   helper,
   placeholder,
   value,
   onChange,
 }: {
+  id?: string;
+  step: string;
   label: string;
   helper: string;
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
 }) {
+  const filled = value.trim().length >= 80;
+
   return (
     <label className="mb-5 block sm:mb-6">
-      <span className="block text-sm font-black text-slate-950">
-        {label}
+      <span className="flex items-center gap-2">
+        <span
+          aria-hidden="true"
+          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-black transition ${
+            filled
+              ? "bg-[#0d9488] text-white"
+              : "bg-slate-200 text-slate-500"
+          }`}
+        >
+          {filled ? "✓" : step}
+        </span>
+        <span className="text-sm font-black text-slate-950">{label}</span>
+        {filled && (
+          <span className="text-[10px] font-black uppercase tracking-[0.1em] text-[#0d9488]">
+            Ajouté
+          </span>
+        )}
       </span>
-      <span className="mb-1.5 mt-1 block text-[11px] font-bold text-slate-400">
+      <span className="mb-1.5 mt-1 block text-[11px] font-bold leading-4 text-slate-400">
         {helper}
       </span>
       <textarea
+        id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
@@ -825,20 +1613,35 @@ function FieldTextarea({
 
 function AnalysisLoader({
   activeStep,
-  progress,
+  elapsedSeconds,
 }: {
   activeStep: number;
-  progress: number;
+  elapsedSeconds: number;
 }) {
+  const waitMessage =
+    elapsedSeconds < 30
+      ? "Une analyse complète prend en général 60 à 90 secondes."
+      : elapsedSeconds < 90
+        ? "L’analyse continue — chaque critère de l’offre est évalué contre ton profil."
+        : "C’est un peu plus long que d’habitude, mais l’analyse est toujours en cours.";
+
   return (
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-[#f5f7f3] px-6 animate-[fadeIn_0.3s_ease-out]">
+    <div
+      className="fixed inset-0 z-[300] flex items-center justify-center bg-[#f5f7f3] px-6 animate-[fadeIn_0.3s_ease-out]"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
       <div className="w-full max-w-[420px]">
-        <div className="mb-12 text-center">
-          <p className="mb-2 text-[11px] font-black uppercase tracking-[0.18em] text-[#0d9488]">
+        <div className="mb-10 text-center">
+          <p className="mb-2 text-[11px] font-black uppercase tracking-[0.18em] text-[#0f766e]">
             FirstReply
           </p>
           <p className="text-xl font-black tracking-[-0.03em] text-slate-950">
             Analyse en cours
+          </p>
+          <p className="mt-2 text-xs font-bold leading-5 text-slate-500">
+            {waitMessage}
           </p>
         </div>
 
@@ -857,16 +1660,16 @@ function AnalysisLoader({
                 <div
                   className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition ${
                     isDone
-                      ? "border-[#0d9488] bg-[#0d9488]"
+                      ? "border-[#0f766e] bg-[#0f766e]"
                       : isActive
-                        ? "border-[#0d9488] bg-teal-50"
+                        ? "border-[#0f766e] bg-teal-50"
                         : "border-slate-200 bg-slate-50"
                   }`}
                 >
                   {isDone ? (
                     <span className="text-sm font-black text-white">✓</span>
                   ) : isActive ? (
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-[#0d9488]" />
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-[#0f766e]" />
                   ) : (
                     <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
                   )}
@@ -874,7 +1677,7 @@ function AnalysisLoader({
                 <span
                   className={`text-sm ${
                     isDone
-                      ? "font-bold text-[#0d9488]"
+                      ? "font-bold text-[#0f766e]"
                       : isActive
                         ? "font-black text-slate-950"
                         : "font-bold text-slate-400"
@@ -887,12 +1690,16 @@ function AnalysisLoader({
           })}
         </div>
 
-        <div className="h-1 overflow-hidden rounded-full bg-slate-200">
-          <div
-            className="h-full rounded-full bg-[#0d9488] transition-[width]"
-            style={{ width: `${progress}%` }}
-          />
+        <div
+          className="h-1 overflow-hidden rounded-full bg-slate-200"
+          role="progressbar"
+          aria-label="Analyse en cours"
+        >
+          <div className="h-full w-1/3 rounded-full bg-[#0f766e] animate-[progressSlide_1.6s_ease-in-out_infinite]" />
         </div>
+        <p className="mt-3 text-center font-mono text-[11px] font-bold text-slate-400">
+          {elapsedSeconds} s écoulée{elapsedSeconds !== 1 ? "s" : ""}
+        </p>
       </div>
     </div>
   );
@@ -931,17 +1738,22 @@ function PhaseOneResult({
   application,
   copiedKey,
   onCopy,
+  showNextStepCta,
+  onGoToContact,
 }: {
   refNode: React.RefObject<HTMLDivElement | null>;
   application: TrackedApplication;
   copiedKey: string;
   onCopy: (key: string, text: string) => void;
+  showNextStepCta: boolean;
+  onGoToContact: () => void;
 }) {
   const preparedDate = formatPreparedDate(application.createdAt);
   const tags = [
     safeText(application.contractType, ""),
     safeText(application.location, ""),
     preparedDate ? `Préparé le ${preparedDate}` : "",
+    "Ajoutée au suivi",
   ].filter(Boolean);
 
   return (
@@ -978,13 +1790,28 @@ function PhaseOneResult({
           </span>
         </div>
         <div className="min-w-0 flex-1 text-center sm:text-left">
-          <div className="mb-1.5 text-[10px] font-black uppercase tracking-[0.13em] text-slate-400">
+          <div className="mb-1 text-[10px] font-black uppercase tracking-[0.13em] text-slate-400">
             Score de correspondance
           </div>
+          <p
+            className="m-0 mb-1 text-sm font-black sm:text-base"
+            style={{ color: scoreColor(application.matchScore) }}
+          >
+            {scoreMeaning(application.matchScore)}
+          </p>
           <p className="m-0 text-[13px] font-medium leading-[1.65] text-slate-700 sm:text-sm">
             {safeText(application.scoreBreakdown, "Analyse du score à compléter.")}
           </p>
         </div>
+      </section>
+
+      <section className="mt-3 rounded-[18px] border border-teal-200 bg-teal-50/40 px-4 py-4 shadow-sm sm:px-5 sm:py-5">
+        <div className="mb-2 text-[10px] font-black uppercase tracking-[0.13em] text-[#0d9488]">
+          Ton angle d'approche
+        </div>
+        <p className="m-0 text-sm font-medium leading-[1.7] text-slate-800">
+          {safeText(application.suggestedAngle, "Angle à personnaliser.")}
+        </p>
       </section>
 
       <div className="mt-3 grid gap-3 md:grid-cols-2">
@@ -1002,14 +1829,15 @@ function PhaseOneResult({
         />
       </div>
 
-      <section className="mt-3 rounded-[18px] border border-teal-200 bg-teal-50/40 px-4 py-4 shadow-sm sm:px-5 sm:py-5">
-        <div className="mb-2 text-[10px] font-black uppercase tracking-[0.13em] text-[#0d9488]">
-          Ton angle d'approche
-        </div>
-        <p className="m-0 text-sm font-medium leading-[1.7] text-slate-800">
-          {safeText(application.suggestedAngle, "Angle à personnaliser.")}
-        </p>
-      </section>
+      {showNextStepCta && (
+        <button
+          type="button"
+          onClick={onGoToContact}
+          className="mt-3 flex min-h-11 w-full items-center justify-center rounded-2xl border border-teal-300 bg-teal-50/70 px-4 py-3 text-center text-sm font-black text-teal-800 transition hover:bg-teal-100"
+        >
+          Étape suivante : trouver le bon contact
+        </button>
+      )}
 
       <SectionTitle sub="À adapter selon le canal d'envoi.">
         Contenu généré
@@ -1028,31 +1856,6 @@ function PhaseOneResult({
         copiedKey={copiedKey}
         onCopy={onCopy}
       />
-
-      <SectionTitle sub="Cherche ces profils sur LinkedIn ou Google pour trouver la bonne personne.">
-        Qui contacter
-      </SectionTitle>
-      <div className="mb-4 flex flex-wrap gap-1.5">
-        {getContactRoles(application).map((role) => (
-          <span
-            key={role}
-            className="rounded-lg border border-slate-200 bg-white/65 px-3 py-1.5 text-[11px] font-bold text-slate-700"
-          >
-            {role}
-          </span>
-        ))}
-      </div>
-      <div className="mb-6">
-        {safeList(application.searchQueries).map((query, index) => (
-          <QueryRow
-            key={`${query}-${index}`}
-            query={query}
-            copyKey={`query-${index}`}
-            copiedKey={copiedKey}
-            onCopy={onCopy}
-          />
-        ))}
-      </div>
     </div>
   );
 }
@@ -1209,6 +2012,11 @@ function QueryRow({
 }
 
 function ContactFoundBox({
+  refNode,
+  highlighted,
+  application,
+  copiedKey,
+  onCopy,
   contactName,
   domain,
   loading,
@@ -1217,6 +2025,11 @@ function ContactFoundBox({
   onDomainChange,
   onPrepare,
 }: {
+  refNode: React.RefObject<HTMLElement | null>;
+  highlighted: boolean;
+  application: TrackedApplication;
+  copiedKey: string;
+  onCopy: (key: string, text: string) => void;
   contactName: string;
   domain: string;
   loading: boolean;
@@ -1225,40 +2038,105 @@ function ContactFoundBox({
   onDomainChange: (value: string) => void;
   onPrepare: () => void;
 }) {
+  const roles = getContactRoles(application);
+  const queries = safeList(application.searchQueries);
+
   return (
-    <section className="mt-3 rounded-[18px] border-2 border-dashed border-slate-300 bg-white/40 px-4 py-6 text-center sm:px-6 sm:py-7">
-      <p className="mb-1 text-[15px] font-black text-slate-950 sm:text-base">
-        Tu as trouvé un contact ?
+    <section
+      ref={refNode}
+      id="firstreply-contact"
+      className={`mt-8 scroll-mt-20 rounded-[20px] border bg-white/60 px-4 py-5 transition-[border-color,box-shadow] duration-500 sm:px-6 sm:py-6 ${
+        highlighted
+          ? "border-teal-400 shadow-[0_0_0_5px_rgba(13,148,136,0.16)]"
+          : "border-slate-200 shadow-sm"
+      }`}
+    >
+      <p className="text-[10px] font-black uppercase tracking-[0.14em] text-[#0d9488]">
+        Étape suivante
       </p>
-      <p className="m-0 mb-4 text-[11px] font-bold text-slate-400 sm:mb-5">
-        Entre le nom complet. On prépare un message personnalisé et les relances.
+      <h3 className="mt-1.5 text-lg font-black tracking-[-0.03em] text-slate-950">
+        Trouve la bonne personne — pas la boîte mail générique.
+      </h3>
+      <p className="mt-1.5 text-[13px] font-medium leading-5 text-slate-600">
+        Un message envoyé directement à la personne qui recrute obtient bien
+        plus de réponses qu’un CV déposé dans un formulaire.
       </p>
-      <div className="mx-auto flex max-w-[460px] flex-col gap-2.5 sm:flex-row">
-        <input
-          placeholder="Prénom Nom"
-          value={contactName}
-          onChange={(event) => onContactChange(event.target.value)}
-          className="w-full rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-[13px] font-semibold text-slate-800 outline-none focus:border-[#0d9488] focus:ring-4 focus:ring-teal-600/10 sm:min-w-[160px] sm:flex-[2] sm:text-sm"
-        />
-        <input
-          placeholder="domaine.com"
-          value={domain}
-          onChange={(event) => onDomainChange(event.target.value)}
-          className="w-full rounded-2xl border border-slate-200 bg-white px-3.5 py-3 font-mono text-[13px] font-semibold text-slate-800 outline-none focus:border-[#0d9488] focus:ring-4 focus:ring-teal-600/10 sm:min-w-[120px] sm:flex-1 sm:text-sm"
-        />
+
+      <p className="mt-4 text-xs font-black text-slate-700">
+        1. Cherche ces profils chez {safeText(application.company, "l’entreprise")} :
+      </p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {roles.map((role) => (
+          <span
+            key={role}
+            className="rounded-lg border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-bold text-slate-700"
+          >
+            {role}
+          </span>
+        ))}
       </div>
-      {error && (
-        <p className="mx-auto mt-3 max-w-[460px] text-left text-[11px] font-black text-red-600">
-          {error}
-        </p>
+      {queries.length > 0 && (
+        <div className="mt-2.5">
+          {queries.map((query, index) => (
+            <QueryRow
+              key={`${query}-${index}`}
+              query={query}
+              copyKey={`query-${index}`}
+              copiedKey={copiedKey}
+              onCopy={onCopy}
+            />
+          ))}
+        </div>
       )}
-      <button
-        onClick={onPrepare}
-        disabled={!contactName.trim() || !domain.trim() || loading}
-        className="mt-4 w-full rounded-2xl bg-slate-900 px-8 py-3 text-sm font-black text-white shadow-lg transition hover:bg-slate-700 disabled:cursor-default disabled:bg-slate-300 sm:w-auto"
-      >
-        {loading ? "Préparation..." : "Préparer l'approche directe"}
-      </button>
+
+      <div className="mt-5 border-t border-slate-200/70 pt-4">
+        <p className="text-xs font-black text-slate-700">
+          2. Tu as trouvé quelqu’un ? Entre son nom — on prépare un message
+          personnalisé et les relances.
+        </p>
+        <div className="mt-3 flex flex-col gap-2.5 sm:flex-row">
+          <label className="w-full sm:min-w-[160px] sm:flex-[2]">
+            <span className="mb-1.5 block text-xs font-black text-slate-700">
+              Nom du contact
+            </span>
+            <input
+              id="firstreply-contact-name"
+              autoComplete="name"
+              placeholder="Ex. Sophie Martin"
+              value={contactName}
+              onChange={(event) => onContactChange(event.target.value)}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-base font-semibold text-slate-800 outline-none focus:border-[#0f766e] focus:ring-4 focus:ring-teal-700/10 sm:text-sm"
+            />
+          </label>
+          <label className="w-full sm:min-w-[120px] sm:flex-1">
+            <span className="mb-1.5 block text-xs font-black text-slate-700">
+              Domaine de l’entreprise
+            </span>
+            <input
+              id="firstreply-contact-domain"
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              placeholder="exemple.com"
+              value={domain}
+              onChange={(event) => onDomainChange(event.target.value)}
+              className="w-full rounded-2xl border border-slate-200 bg-white px-3.5 py-3 font-mono text-base font-semibold text-slate-800 outline-none focus:border-[#0f766e] focus:ring-4 focus:ring-teal-700/10 sm:text-sm"
+            />
+          </label>
+        </div>
+        {error && (
+          <p role="alert" className="mt-3 text-xs font-black text-red-700">
+            {error}
+          </p>
+        )}
+        <button
+          onClick={onPrepare}
+          disabled={!contactName.trim() || !domain.trim() || loading}
+          className="mt-4 w-full rounded-2xl bg-slate-900 px-8 py-3 text-sm font-black text-white shadow-lg transition hover:bg-slate-700 disabled:cursor-default disabled:bg-slate-300 sm:w-auto"
+        >
+          {loading ? "Préparation..." : "Préparer l'approche directe"}
+        </button>
+      </div>
     </section>
   );
 }
@@ -1441,12 +2319,13 @@ function TrackerBoard({
                 value={search}
                 onChange={(event) => onSearchChange(event.target.value)}
                 placeholder="Rechercher..."
-                className="h-10 w-full rounded-2xl border border-slate-200 bg-white px-10 text-[13px] font-semibold outline-none transition placeholder:text-slate-400 focus:border-[#0d9488] focus:ring-4 focus:ring-teal-600/10 sm:h-11 sm:text-sm"
+                aria-label="Rechercher une candidature"
+                className="h-11 w-full rounded-2xl border border-slate-200 bg-white px-10 text-base font-semibold outline-none transition placeholder:text-slate-500 focus:border-[#0f766e] focus:ring-4 focus:ring-teal-700/10 sm:text-sm"
               />
             </label>
             <button
               onClick={onNewApplication}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-2xl bg-[#0d9488] px-4 text-[13px] font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#0f766e] sm:h-11 sm:text-sm"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-[#0f766e] px-4 text-[13px] font-black text-white shadow-lg shadow-teal-900/10 transition hover:bg-[#115e59] sm:text-sm"
             >
               + Nouvelle candidature
             </button>
@@ -1461,8 +2340,8 @@ function TrackerBoard({
           <TrackerStatCard label="Décrochés" value={stats.won} tone="teal" />
         </div>
 
-        <div className="mb-4 flex items-center justify-between gap-3 border-b border-slate-300/60 pb-3 sm:mb-5">
-          <div className="flex items-center gap-3 overflow-x-auto sm:flex-wrap">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-300/60 pb-3 sm:mb-5">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
             <TrackerFilterButton
               active={filter === "active"}
               label="En cours"
@@ -1484,7 +2363,7 @@ function TrackerBoard({
           </div>
           <button
             onClick={() => setSort((current) => current === "priority" ? "recent" : "priority")}
-            className={`inline-flex shrink-0 items-center gap-1.5 rounded-2xl border px-3 py-1.5 text-[10px] font-black transition sm:text-[11px] ${
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-2xl border px-3 py-1.5 text-[10px] font-black transition sm:min-h-9 sm:text-[11px] ${
               sort === "recent"
                 ? "border-[#0d9488] bg-teal-50/70 text-[#0d9488]"
                 : "border-slate-200 bg-white/60 text-slate-500 hover:border-[#0d9488] hover:text-[#0d9488]"
@@ -1647,7 +2526,8 @@ function TrackerFilterButton({
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-2 border-b-4 px-1 pb-2 text-sm font-black transition ${
+      aria-pressed={active}
+      className={`inline-flex min-h-11 items-end gap-2 border-b-4 px-1 pb-2 text-sm font-black transition ${
         active
           ? "border-[#0d9488] text-[#00796b]"
           : "border-transparent text-slate-700 hover:text-[#0d9488]"
@@ -1700,12 +2580,23 @@ function TrackerCompactCard({
       <div className={`absolute inset-x-4 top-0 h-1 rounded-b-full ${config.railClass}`} />
 
       <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="relative">
+        <div
+          className="relative"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && menuOpen) {
+              event.preventDefault();
+              onToggleMenu();
+            }
+          }}
+        >
           <button
             type="button"
             aria-label={`Changer le statut de ${safeText(application.company, "cette candidature")}`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-controls={`tracker-status-menu-${application.id}`}
             onClick={onToggleMenu}
-            className={`inline-flex max-w-[176px] items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-black transition hover:brightness-95 focus:outline-none focus:ring-4 focus:ring-teal-600/10 ${config.badgeClass}`}
+            className={`inline-flex min-h-10 max-w-[176px] items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-black transition hover:brightness-95 focus:outline-none focus:ring-4 focus:ring-teal-600/10 ${config.badgeClass}`}
           >
             <span className={`h-2 w-2 shrink-0 rounded-full ${config.dotClass}`} />
             <span className="truncate">{trackerStatusLabel(application.status)}</span>
@@ -1713,15 +2604,22 @@ function TrackerCompactCard({
           </button>
 
           {menuOpen && (
-            <div className="absolute left-0 top-9 z-[999] w-52 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div
+              id={`tracker-status-menu-${application.id}`}
+              role="menu"
+              aria-label={`Statut de ${safeText(application.company, "la candidature")}`}
+              className="absolute left-0 top-11 z-[999] w-52 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+            >
               {TRACKER_STATUS_OPTIONS.map((status) => {
                 const optionConfig = trackerStatusConfig[status];
                 return (
                   <button
                     key={status}
                     type="button"
+                    role="menuitemradio"
+                    aria-checked={application.status === status}
                     onClick={() => onStatusChange(status)}
-                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-black text-slate-700 transition hover:bg-teal-50 hover:text-[#0d9488]"
+                    className="flex min-h-11 w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-black text-slate-700 transition hover:bg-teal-50 hover:text-[#0f766e]"
                   >
                     <span className={`h-2.5 w-2.5 rounded-full ${optionConfig.menuDotClass}`} />
                     <span>{trackerStatusLabel(status)}</span>
@@ -1736,8 +2634,8 @@ function TrackerCompactCard({
           <TrackerScoreRing score={application.matchScore} won={isWon} />
           <button
             onClick={onDelete}
-            aria-label="Supprimer"
-            className="flex h-6 w-6 items-center justify-center rounded-lg text-slate-300 transition hover:bg-red-50 hover:text-red-400"
+            aria-label={`Supprimer la candidature ${safeText(application.company, "sélectionnée")}`}
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 transition hover:bg-red-50 hover:text-red-600"
           >
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="3 6 5 6 21 6" />
@@ -1747,11 +2645,14 @@ function TrackerCompactCard({
         </div>
       </div>
 
-      <h2
-        className="line-clamp-1 cursor-pointer text-base font-black tracking-[-0.03em] text-slate-950 hover:text-[#0d9488] sm:text-lg"
-        onClick={onSelect}
-      >
-        {safeText(application.company, "Entreprise")}
+      <h2 className="line-clamp-1 text-base font-black tracking-[-0.03em] text-slate-950 sm:text-lg">
+        <button
+          type="button"
+          onClick={onSelect}
+          className="min-h-10 text-left transition hover:text-[#0f766e]"
+        >
+          {safeText(application.company, "Entreprise")}
+        </button>
       </h2>
       <p className="mb-2 line-clamp-1 text-[12px] font-bold text-slate-600 sm:mb-3 sm:text-[13px]">
         {safeText(application.role, "Poste")}
@@ -1773,13 +2674,13 @@ function TrackerCompactCard({
           <div className="flex shrink-0 gap-1">
             <button
               onClick={onActionDone}
-              className={`shrink-0 rounded-xl px-2 py-1 text-[10px] font-black transition sm:px-2.5 sm:text-[11px] ${tealActionClass}`}
+              className={`min-h-10 shrink-0 rounded-xl px-2.5 py-1 text-[10px] font-black transition sm:text-[11px] ${tealActionClass}`}
             >
               {state.primaryAction}
             </button>
             <button
               onClick={onWon}
-              className="shrink-0 rounded-xl border border-emerald-200 bg-emerald-50/70 px-2 py-1 text-[10px] font-black text-emerald-700 transition hover:bg-emerald-100 sm:px-2.5 sm:text-[11px]"
+              className="min-h-10 shrink-0 rounded-xl border border-emerald-200 bg-emerald-50/70 px-2.5 py-1 text-[10px] font-black text-emerald-800 transition hover:bg-emerald-100 sm:text-[11px]"
             >
               Décroché
             </button>
@@ -2189,6 +3090,13 @@ function scoreColor(score: number) {
   if (score < 40) return "#94a3b8";
   if (score < 65) return "#d97706";
   return "#0d9488";
+}
+
+function scoreMeaning(score: number) {
+  if (score < 40) return "Correspondance limitée";
+  if (score < 65) return "Correspondance moyenne";
+  if (score < 80) return "Bonne correspondance";
+  return "Très bonne correspondance";
 }
 
 function statusLabel(status: string) {

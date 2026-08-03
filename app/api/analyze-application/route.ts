@@ -192,6 +192,7 @@ RÈGLE EMAIL DE CANDIDATURE GÉNÉRAL :
 
 RÈGLE FAIBLESSES :
 - Maximum 3 faiblesses, pas plus
+- Chaque faiblesse doit couvrir un critère distinct. Ne reformule jamais trois fois le même manque.
 - Format : "Ils cherchent X — tu peux compenser en mettant en avant Y"
 - Pas d'invention : ne mentionne pas de faiblesses sur des critères que l'offre ne demande pas
 - Si le score est de 100, tu DOIS quand même identifier 1 ou 2 axes d'amélioration réalistes du profil pour ce poste

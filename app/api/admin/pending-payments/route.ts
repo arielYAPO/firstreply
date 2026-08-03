@@ -6,7 +6,9 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET;
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const secret = searchParams.get("secret");
+    const secret =
+      request.headers.get("x-admin-secret") ?? searchParams.get("secret");
+    const requestedId = searchParams.get("request");
 
     if (!ADMIN_SECRET || secret !== ADMIN_SECRET) {
       return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
@@ -14,7 +16,7 @@ export async function GET(request: Request) {
 
     const admin = createSupabaseAdmin();
 
-    const { data: requests, error } = await admin
+    let query = admin
       .from("payment_requests")
       .select(`
         id,
@@ -26,10 +28,17 @@ export async function GET(request: Request) {
         created_at,
         paid_at,
         paypal_reference,
+        verification_requested_at,
         admin_note
       `)
       .order("created_at", { ascending: false })
       .limit(50);
+
+    if (requestedId) {
+      query = query.eq("id", requestedId);
+    }
+
+    const { data: requests, error } = await query;
 
     if (error) {
       return NextResponse.json({ error: "Erreur de lecture." }, { status: 500 });

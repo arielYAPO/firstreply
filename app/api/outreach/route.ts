@@ -65,6 +65,12 @@ L'email direct ne doit JAMAIS être identique ou quasi-identique à l'email gén
 
 L'email direct fait 80 à 130 mots. Pas plus.
 
+RÈGLE D'ANCRAGE — ZÉRO INVENTION :
+- N'invente aucun fait sur le contact, l'entreprise, ses valeurs, ses projets ou sa façon de travailler.
+- Le nom et le domaine ne prouvent rien sur le contact. Ne prétends jamais avoir suivi son travail ou connaître son approche sans preuve explicite dans l'offre.
+- Si aucune information vérifiable sur le contact n'est fournie, personnalise l'accroche à partir du poste, des missions et de l'entreprise mentionnés dans l'offre.
+- Chaque affirmation factuelle doit venir de l'offre, du CV ou du contenu de candidature fourni.
+
 RÈGLE DM LINKEDIN :
 Le DM LinkedIn fait 2 à 4 phrases maximum. Style conversationnel, jamais corporate.
 INTERDIT : copier le champ "angle" tel quel, utiliser "je me positionne comme", "je suis convaincu", "mon profil semble aligné"

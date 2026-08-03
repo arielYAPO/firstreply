@@ -1,80 +1,96 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { createSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { getPayPalEnvironment, isPayPalConfigured, paypalRequest } from "@/lib/paypal";
 
-const THIRTY_MINUTES_MS = 30 * 60 * 1000;
+type PayPalOrder = { id: string; status: string };
+
+async function getAuthenticatedContext() {
+  const cookieStore = await cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: {
+      getAll: () => cookieStore.getAll(),
+      setAll: (items) => items.forEach(({ name, value, options }) => cookieStore.set(name, value, options)),
+    } },
+  );
+  const { data: { user } } = await supabase.auth.getUser();
+  return { supabase, user };
+}
+
+async function createManualRequest(
+  supabase: Awaited<ReturnType<typeof getAuthenticatedContext>>["supabase"],
+  userId: string,
+) {
+  const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const { data: existing } = await supabase.from("payment_requests").select("id")
+    .eq("user_id", userId).eq("status", "pending").gte("created_at", since)
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (existing) return { paymentRequestId: existing.id, status: "pending", reused: true, automated: false };
+
+  const { data, error } = await supabase.from("payment_requests").insert({
+    user_id: userId, amount_cents: 1000, currency: "EUR", credits_requested: 100, status: "pending",
+  }).select("id").single();
+  if (error || !data) throw new Error("Manual payment request failed.");
+  return { paymentRequestId: data.id, status: "pending", reused: false, automated: false };
+}
 
 export async function POST() {
   try {
-    const cookieStore = await cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll(); },
-          setAll(cookiesToSet) {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            );
-          },
-        },
-      }
-    );
+    const { supabase, user } = await getAuthenticatedContext();
+    if (!user) return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+    if (!isPayPalConfigured()) return NextResponse.json(await createManualRequest(supabase, user.id));
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
-    }
-
-    // Idempotency: check for existing pending request within last 30 minutes
-    const thirtyMinutesAgo = new Date(Date.now() - THIRTY_MINUTES_MS).toISOString();
-
-    const { data: existingRequest } = await supabase
-      .from("payment_requests")
-      .select("id, created_at, status")
-      .eq("user_id", user.id)
-      .eq("status", "pending")
-      .gte("created_at", thirtyMinutesAgo)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .single();
-
-    if (existingRequest) {
-      return NextResponse.json({
-        paymentRequestId: existingRequest.id,
-        status: "pending",
-        reused: true,
-      });
-    }
-
-    // Create new payment request
-    const { data: newRequest, error } = await supabase
-      .from("payment_requests")
-      .insert({
-        user_id: user.id,
-        amount_cents: 1000,
-        currency: "EUR",
-        credits_requested: 100,
-        status: "pending",
-      })
-      .select("id")
-      .single();
-
-    if (error || !newRequest) {
-      console.error("Payment request insert error", error);
-      return NextResponse.json(
-        { error: "Impossible de créer la demande de paiement." },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      paymentRequestId: newRequest.id,
+    const admin = createSupabaseAdmin();
+    const environment = getPayPalEnvironment();
+    const { data: request, error: insertError } = await admin.from("payment_requests").insert({
+      user_id: user.id,
+      amount_cents: 1000,
+      currency: "EUR",
+      credits_requested: 100,
       status: "pending",
-      reused: false,
-    });
-  } catch {
-    return NextResponse.json({ error: "Erreur serveur." }, { status: 500 });
+      payment_provider: "paypal_checkout",
+      paypal_environment: environment,
+    }).select("id").single();
+    if (insertError || !request) throw new Error("Automated payment request insert failed.");
+
+    try {
+      const order = await paypalRequest<PayPalOrder>("/v2/checkout/orders", {
+        method: "POST",
+        requestId: request.id,
+        body: {
+          intent: "CAPTURE",
+          purchase_units: [{
+            reference_id: request.id,
+            custom_id: user.id,
+            description: "Pack FirstReply — 100 crédits",
+            amount: { currency_code: "EUR", value: "10.00" },
+          }],
+          payment_source: { paypal: { experience_context: {
+            brand_name: "FirstReply", user_action: "PAY_NOW", shipping_preference: "NO_SHIPPING",
+          } } },
+        },
+      });
+      const { error: updateError } = await admin.from("payment_requests")
+        .update({ paypal_order_id: order.id }).eq("id", request.id).eq("status", "pending");
+      if (updateError) throw updateError;
+      return NextResponse.json({
+        orderId: order.id,
+        paymentRequestId: request.id,
+        status: order.status,
+        automated: true,
+        environment,
+      });
+    } catch (error) {
+      await admin.from("payment_requests").update({
+        status: "rejected", admin_note: "PayPal order creation failed.",
+      }).eq("id", request.id).eq("status", "pending");
+      throw error;
+    }
+  } catch (error) {
+    console.error("Create PayPal order failed.", error instanceof Error ? error.message : "Unknown error.");
+    return NextResponse.json({ error: "Impossible de créer la commande PayPal." }, { status: 502 });
   }
 }

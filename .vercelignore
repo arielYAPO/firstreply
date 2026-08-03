@@ -1,0 +1,6 @@
+.tmp/
+*.docx
+FirstReply_Product_Data_Brief_2026-07-28.md
+scripts/build_firstreply_brief.py
+FIRSTREPLY_ANALYSE_ANONYMISEE_2026-08-02.md
+HANDOFF_ONBOARDING_FIRSTREPLY.md

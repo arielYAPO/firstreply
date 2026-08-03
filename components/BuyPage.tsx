@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthContext } from "./AuthProvider";
+import PayPalCheckoutButton from "./PayPalCheckoutButton";
 
 const PAYPAL_ME_LINK = "https://www.paypal.com/ncp/payment/TJ3FSUERJ7PKE";
 
@@ -15,7 +16,9 @@ export default function BuyPage() {
   const [error, setError] = useState("");
   const [requestId, setRequestId] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [paypalMode, setPayPalMode] = useState<"loading" | "manual" | "sandbox" | "live">("loading");
 
+  const [reported, setReported] = useState(false);
   useEffect(() => {
     if (!loading && !user) {
       router.push("/");
@@ -34,11 +37,12 @@ export default function BuyPage() {
     const stored = localStorage.getItem("firstreply_pending_payment");
     if (stored) {
       try {
-        const { id, timestamp } = JSON.parse(stored);
+        const { id, timestamp, reported: wasReported } = JSON.parse(stored);
         const thirtyMinutes = 30 * 60 * 1000;
         if (Date.now() - timestamp < thirtyMinutes) {
           setRequestId(id);
           setState("waiting");
+          setReported(Boolean(wasReported));
         } else {
           localStorage.removeItem("firstreply_pending_payment");
         }
@@ -86,8 +90,39 @@ export default function BuyPage() {
   async function handleCheck() {
     if (!requestId) return;
     setChecking(true);
+    setError("");
 
     try {
+      if (!reported) {
+        const reportResponse = await fetch("/api/paypal/report-payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paymentRequestId: requestId }),
+        });
+        const reportData = await reportResponse.json();
+
+        if (!reportResponse.ok) {
+          setError(reportData.error || "Impossible de signaler le paiement.");
+          return;
+        }
+        if (reportData.paid) {
+          localStorage.removeItem("firstreply_pending_payment");
+          await refreshCredits();
+          router.push("/dashboard");
+          return;
+        }
+
+        setReported(true);
+        localStorage.setItem(
+          "firstreply_pending_payment",
+          JSON.stringify({ id: requestId, timestamp: Date.now(), reported: true })
+        );
+        setError(
+          "C\u2019est envoy\u00e9. Ton paiement va \u00eatre v\u00e9rifi\u00e9 manuellement dans quelques minutes."
+        );
+        return;
+      }
+
       const res = await fetch("/api/paypal/capture-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -109,6 +144,16 @@ export default function BuyPage() {
     }
   }
 
+  const handlePayPalMode = useCallback(
+    (mode: "manual" | "sandbox" | "live") => setPayPalMode(mode),
+    [],
+  );
+
+  const handleAutomatedPayment = useCallback(async () => {
+    localStorage.removeItem("firstreply_pending_payment");
+    await refreshCredits();
+    router.push("/dashboard");
+  }, [refreshCredits, router]);
   if (state === "waiting") {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center bg-[#f5f7f3] px-5">
@@ -212,28 +257,29 @@ export default function BuyPage() {
           </p>
         )}
 
-        <button
-          onClick={handlePay}
-          disabled={state === "loading"}
-          className="mt-6 flex w-full items-center justify-center gap-3 rounded-xl bg-[#0070ba] py-3.5 text-sm font-black text-white shadow-lg transition hover:bg-[#005ea6] disabled:opacity-60"
-        >
-          {state === "loading" ? (
-            <>
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-              Préparation...
-            </>
-          ) : (
-            <>
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.72a.77.77 0 0 1 .757-.65h6.507c2.26 0 3.88.546 4.817 1.624.436.502.723 1.047.86 1.638.146.63.148 1.38.007 2.294l-.012.076v.676l.526.298a3.52 3.52 0 0 1 1.07.826c.37.442.614.979.72 1.595.11.634.084 1.37-.075 2.187-.183.94-.48 1.76-.884 2.433a5.11 5.11 0 0 1-1.407 1.53 5.33 5.33 0 0 1-1.87.875c-.698.197-1.474.296-2.306.296h-.548a1.65 1.65 0 0 0-1.632 1.392l-.04.217-.676 4.29-.03.155a.197.197 0 0 1-.06.122.194.194 0 0 1-.128.048H7.076z" />
-              </svg>
-              PayPal
-            </>
-          )}
-        </button>
+        <PayPalCheckoutButton
+          onMode={handlePayPalMode}
+          onPaid={handleAutomatedPayment}
+        />
+
+        {paypalMode === "loading" && (
+          <div className="mt-2 flex justify-center">
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-[#0070ba]" />
+          </div>
+        )}
+
+        {paypalMode === "manual" && (
+          <button
+            onClick={handlePay}
+            disabled={state === "loading"}
+            className="mt-2 flex w-full items-center justify-center gap-3 rounded-xl bg-[#0070ba] py-3.5 text-sm font-black text-white shadow-lg transition hover:bg-[#005ea6] disabled:opacity-60"
+          >
+            {state === "loading" ? "Préparation..." : "Payer avec PayPal"}
+          </button>
+        )}
 
         <p className="mt-3 text-center text-[11px] font-medium text-slate-400">
-          Paiement traité via PayPal
+          {paypalMode === "sandbox" ? "Mode Sandbox — aucun argent réel" : "Paiement traité via PayPal"}
         </p>
 
         {/* Bottom note */}
@@ -242,7 +288,7 @@ export default function BuyPage() {
             <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
             <polyline points="22 4 12 14.01 9 11.01" />
           </svg>
-          Crédits activés sous quelques minutes après vérification
+          {paypalMode === "manual" ? "Crédits activés après vérification" : "Crédits activés automatiquement après paiement"}
         </div>
       </div>
     </main>

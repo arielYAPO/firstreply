@@ -176,7 +176,7 @@ export default function AccessGate() {
             ) : (
               <button
                 onClick={() => setShowAccessKey(true)}
-                className="w-full text-center font-mono text-[11px] text-slate-400 transition hover:text-[#0d9488]"
+                className="inline-flex min-h-11 w-full items-center justify-center px-4 text-center font-mono text-[12px] text-slate-500 transition hover:text-[#0d9488]"
               >
                 J'ai un code d'accès
               </button>

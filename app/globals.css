@@ -39,6 +39,11 @@ button:active {
   transform: scale(0.98);
 }
 
+:where(button, a, input, textarea, select, [role="button"]):focus-visible {
+  outline: 3px solid #0f766e;
+  outline-offset: 3px;
+}
+
 @keyframes fadeUp {
   from {
     opacity: 0;
@@ -68,6 +73,15 @@ button:active {
   }
 }
 
+@keyframes progressSlide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+
 @keyframes shake {
   0%,
   100% {
@@ -78,5 +92,16 @@ button:active {
   }
   75% {
     transform: translateX(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
